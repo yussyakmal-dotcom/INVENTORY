@@ -1,0 +1,56 @@
+services:
+  mariadb:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?isi DB_ROOT_PASSWORD di .env}
+      MARIADB_DATABASE: inventory_db
+      MARIADB_USER: inventory
+      MARIADB_PASSWORD: ${DB_PASSWORD:?isi DB_PASSWORD di .env}
+      TZ: ${TZ:-Asia/Jakarta}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--max-allowed-packet=64M"]
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # Database sengaja tidak dibuka ke luar container.
+    # Buka baris berikut hanya bila perlu akses langsung dari host:
+    # ports:
+    #   - "127.0.0.1:3306:3306"
+
+  app:
+    build:
+      context: ./app
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: inventori-mvp:1.0
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_NAME: inventory_db
+      DB_USER: inventory
+      DB_PASSWORD: ${DB_PASSWORD}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?isi ADMIN_PASSWORD di .env}
+      SEED_DEMO_USERS: ${SEED_DEMO_USERS:-true}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:?isi DEMO_PASSWORD di .env}
+      DEMO_DATA: ${DEMO_DATA:-true}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SESSION_HOURS: ${SESSION_HOURS:-12}
+      AUDIT_LOG_PATH: /var/log/inventory/audit_log.jsonl
+      TZ: ${TZ:-Asia/Jakarta}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - audit_logs:/var/log/inventory
+
+volumes:
+  mariadb_data:
+  audit_logs:
