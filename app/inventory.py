@@ -127,10 +127,6 @@ def warehouse_access(db, user, wid, write=True):
     ids = allowed_warehouses(db, user)
     if ids is not None and wh.id not in ids:
         fail("Gudang di luar lingkup pengguna.", 403)
-    if write:
-        from inventory_operations import freeze
-        if freeze(db, wh.id):
-            fail("Gudang sedang opname; selesaikan atau batalkan opname sebelum mutasi stok.", 409)
     return wh
 
 
@@ -164,8 +160,11 @@ def execute(db, user, operation, payload, key, fn, active=True):
             return response
         if active:
             require_active(db)
+        from inventory_restore import audit_before
+        before = audit_before(db, operation, payload)
         result = json.loads(dump(fn(who)))
-        db.add(Audit(actor_id=who.id, operation=operation, document=dump(payload)))
+        audit_payload = {k: v for k,v in payload.items() if k != 'file'}
+        db.add(Audit(actor_id=who.id, operation=operation, document=dump({'request': audit_payload, 'before': before, 'after': result})))
         db.add(Command(actor_id=who.id, operation=operation, request_key=key,
                        payload_hash=hashed, response=dump(result)))
         db.commit()
@@ -229,6 +228,18 @@ def initialize(engine, sessions):
             c.schema_version = 6
         if c.schema_version < 7:
             c.schema_version = 7
+        if c.active and c.archive:
+            from inventory_restore import restore_archive
+            restore_archive(db, json.loads(c.archive))
+        if c.schema_version < 8:
+            import secrets
+            for o in db.query(Operation).filter_by(kind='opname'):
+                doc = json.loads(o.document)
+                doc.setdefault('token', secrets.token_hex(24))
+                doc.setdefault('rack', '')
+                doc.setdefault('recount', 0)
+                o.document = dump(doc)
+        c.schema_version = max(c.schema_version, 8)
         db.commit()
 
 
@@ -276,6 +287,9 @@ def save_location(db, user, body, kitchen=False):
         item.warehouse_id = wh.id
     else:
         active = flag(body.get("active", True), "Status aktif")
+        if active and kind == "central" and (not item.id or item.kind != "central" or not item.active):
+            if db.query(Warehouse).filter(Warehouse.kind == "central", Warehouse.active.is_(True), Warehouse.id != (item.id or 0)).first():
+                fail("Hanya satu Gudang Central aktif diperbolehkan.", 409)
         if item.id:
             linked = db.query(Kitchen).filter_by(warehouse_id=item.id).first()
             if kind != item.kind and (linked or warehouse_used(db, item.id) or item.legacy_id is not None):
@@ -430,6 +444,8 @@ def migrate(db, user, body, state_model):
     ctrl.legacy_version = preview["source_version"]
     ctrl.active = True
     ctrl.activated_at = now()
+    from inventory_restore import restore_archive
+    restore_archive(db, data)
     legacy = db.get(state_model, 1)
     if legacy:
         legacy.version += 1  # Wake existing browser tabs so they enter the new UI.
@@ -437,7 +453,8 @@ def migrate(db, user, body, state_model):
 
 
 def product_dict(p):
-    return {"id": p.id, "code": p.code, "name": p.name, "kind": p.kind,
+    from inventory_restore import attached
+    return {**attached(p, "product"), "id": p.id, "code": p.code, "name": p.name, "kind": p.kind,
             "base_uom": p.base_uom, "uoms": json.loads(p.uoms), "discrete": p.discrete,
             "shelf_life_days": p.shelf_life_days, "kitchen_id": p.kitchen_id,
             "category": product_category(p.kind), "can_have_bom": p.kind in BOM_KINDS,
@@ -502,6 +519,8 @@ def save_product(db, user, body, pid=None):
         p.revision += 1
     db.add(p)
     db.flush()
+    from inventory_restore import save_product_profile
+    save_product_profile(db, p, body)
     # An edit must not silently invalidate an already active recipe.
     for active_bom in db.query(Bom).filter_by(status="active"):
         validate_bom(db, get(db, Product, active_bom.product_id), json.loads(active_bom.document))
@@ -643,12 +662,13 @@ def movement(db, balance, lot, qty, kind, reference, user):
 
 def stock_rows(db, user):
     from inventory_operations import reserved
+    from inventory_restore import rack
     ids = allowed_warehouses(db, user)
     query = db.query(Balance, Lot).join(Lot, Lot.id == Balance.lot_id).filter(Balance.qty > 0)
     if ids is not None:
         query = query.filter(Balance.warehouse_id.in_(ids))
     return [{"balance_id": b.id, "lot_id": l.id, "product_id": l.product_id,
-             "warehouse_id": b.warehouse_id, "batch_number": l.batch_number,
+             "warehouse_id": b.warehouse_id, "batch_number": l.batch_number, "rack": rack(db, b.id), "received_at": str(l.received_at),
              "expiry_date": str(l.expiry_date) if l.expiry_date else None,
              "qty": str(b.qty), "reserved_scrap": str(reserved(db, b.id)), "available_qty": str(b.qty - reserved(db, b.id)), "unit_cost": str(l.unit_cost), "blocked": l.blocked,
              "usable": not l.blocked and l.expiry_date is not None and l.expiry_date >= today()}
@@ -700,6 +720,8 @@ def receive_stock(db, user, body):
     bal = Balance(lot_id=lot.id, warehouse_id=wh.id, qty=qty)
     db.add(bal)
     db.flush()
+    from inventory_restore import set_rack
+    set_rack(db, bal.id, body.get("rack", ""))
     movement(db, bal, lot, qty, "RECEIPT", label(body.get("reference"), "Referensi", 150), user)
     return {"lot_id": lot.id, "qty": str(qty), "uom": p.base_uom, "input_uom": unit, "input_qty": str(entered_qty), "unit_cost": str(base_cost)}
 
@@ -710,13 +732,24 @@ def consume(db, user, body):
     if not p.active:
         fail("Produk tidak aktif.")
     ref = label(body.get("reference"), "Alasan/referensi pemakaian", 150)
-    picks = fefo(db, p, wh, body.get("qty"))
+    unit, factor = selected_unit(p, body.get('uom'))
+    entered_qty = number(body.get('qty'), 'Qty pemakaian', True)
+    picks = fefo(db, p, wh, quantity_for(p, entered_qty * factor))
     cost = Decimal(0)
     for balance, lot, qty in picks:
         balance.qty -= qty
         movement(db, balance, lot, -qty, "USAGE", ref, user)
         cost += qty * lot.unit_cost
-    return {"cost": str(cost), "picks": [{"lot_id": l.id, "qty": str(q)} for _, l, q in picks]}
+    from inventory_restore import next_number
+    from inventory_operations import new_operation, save
+    data = {"reference": ref, "cost": str(cost), "input_qty": str(entered_qty), "input_uom": unit,
+            "lines": [{"product_id": p.id, "code": p.code, "name": p.name, "uom": p.base_uom,
+                       "lot_id": l.id, "batch_number": l.batch_number, "expiry_date": str(l.expiry_date),
+                       "qty": str(q), "unit_cost": str(l.unit_cost)} for _, l, q in picks]}
+    o = new_operation(db, user, 'usage', {'warehouse_id': wh.id, 'document_date': str(today())}, data, status='posted')
+    data['number'] = o.number
+    save(db, o, data)
+    return {**data, "picks": data['lines']}
 
 
 def document_date(value, name):
@@ -731,14 +764,15 @@ def document_date(value, name):
         fail(f"{name} harus tanggal YYYY-MM-DD dan tidak boleh melewati hari ini.")
 
 
-def ship(db, user, body):
+def ship(db, user, body, reserved_picks=None):
     src = warehouse_access(db, user, body.get("source_id"))
     dst = get(db, Warehouse, body.get("destination_id"))
     if not dst.active or src.id == dst.id:
         fail("Gudang tujuan harus aktif dan berbeda dari asal.")
     sender_name = label(body.get("sender_name"), "Nama petugas pengirim", 150)
     vehicle_number = label(body.get("vehicle_number"), "Nomor kendaraan pengirim", 50).upper()
-    doc_no = label(body.get("document_number"), "Nomor dokumen kirim", 150).upper()
+    from inventory_restore import next_number
+    doc_no = label(body["document_number"], "Nomor dokumen kirim", 150).upper() if body.get("document_number") else next_number(db, "TRF")
     shipped_date = document_date(body.get("shipped_date"), "Tanggal kirim")
     if db.query(TransferDocument).filter_by(document_number=doc_no).first():
         fail("Nomor dokumen kirim sudah digunakan.", 409)
@@ -760,7 +794,9 @@ def ship(db, user, body):
         base_qty = quantity_for(p, entered_qty * factor)
         unit_snapshots[str(p.id)] = {'uom': unit, 'factor': str(factor), 'qty': str(entered_qty), 'base_qty': str(base_qty),
                                       'base_uom': p.base_uom, 'units': {p.base_uom: '1', **json.loads(p.uoms)}}
-        picks.extend(fefo(db, p, src, base_qty))
+        selected = [(b,l,q) for b,l,q in reserved_picks if l.product_id == p.id] if reserved_picks is not None else fefo(db, p, src, base_qty)
+        if sum(q for _,_,q in selected) != base_qty: fail("Alokasi draft tidak sesuai jumlah pengiriman.", 409)
+        picks.extend(selected)
     transfer = Transfer(source_id=src.id, destination_id=dst.id, reference=label(body.get("reference") or doc_no, "Referensi", 150), created_by=user.id)
     db.add(transfer)
     db.flush()
@@ -776,6 +812,7 @@ def ship(db, user, body):
 
 
 def transfer_dict(db, t):
+    from inventory_restore import transit_loss
     doc = db.get(TransferDocument, t.id)
     unit_record = db.get(TransferUnits, t.id)
     unit_snapshots = json.loads(unit_record.document) if unit_record else {}
@@ -792,7 +829,8 @@ def transfer_dict(db, t):
                       "shipping_uom": unit_snapshots.get(str(product.id), {}).get('uom', product.base_uom),
                       "batch_number": lot.batch_number, "expiry_date": str(lot.expiry_date) if lot.expiry_date else None,
                       "shipped_qty": str(line.shipped_qty), "received_qty": str(line.received_qty),
-                      "remaining": str(line.shipped_qty - line.received_qty)})
+                      "lost_qty": str(transit_loss(db, line.id)), "pending_loss": str(transit_loss(db, line.id, pending=True)-transit_loss(db,line.id)),
+                      "remaining": str(line.shipped_qty - line.received_qty-transit_loss(db,line.id))})
     receipts = [{"id": r.id, "received_date": str(r.received_date), "actor_id": r.actor_id,
                  "recorded_at": str(r.created_at), "receiver_name": receiver_names.get(r.id),
                  "lines": [{"id": l.transfer_line_id, "qty": str(l.qty), **receipt_units.get(r.id, {}).get(str(l.transfer_line_id), {})} for l in db.query(TransferReceiptLine).filter_by(receipt_id=r.id)]}
@@ -808,7 +846,7 @@ def transfer_dict(db, t):
 def receive_transfer(db, user, tid, body):
     t = get(db, Transfer, tid)
     warehouse_access(db, user, t.destination_id)
-    if t.status == "received":
+    if t.status in {"received", "closed"}:
         fail("Transfer sudah diterima seluruhnya.", 409)
     doc = get(db, TransferDocument, t.id)
     received_date = document_date(body.get("received_date"), "Tanggal terima")
@@ -843,7 +881,8 @@ def receive_transfer(db, user, tid, body):
         qty = number(qty * factor, 'Qty dasar diterima')
         if p.discrete and qty != qty.to_integral_value():
             fail("Qty produk diskret harus bulat.")
-        if qty > line.shipped_qty - line.received_qty:
+        from inventory_restore import transit_loss
+        if qty > line.shipped_qty - line.received_qty-transit_loss(db,line.id,pending=True):
             fail("Jumlah diterima melebihi sisa kiriman.")
         if qty == 0:
             continue
@@ -861,7 +900,8 @@ def receive_transfer(db, user, tid, body):
     if total == 0:
         fail("Jumlah diterima harus lebih dari nol.")
     db.add(TransferReceivedUnits(receipt_id=receipt.id, document=dump(received_units)))
-    t.status = "received" if all(l.shipped_qty == l.received_qty for l in lines.values()) else "partial"
+    from inventory_restore import transit_loss
+    t.status = "received" if all(l.shipped_qty == l.received_qty for l in lines.values()) else "closed" if all(l.shipped_qty == l.received_qty+transit_loss(db,l.id) for l in lines.values()) else "partial"
     db.flush()
     return transfer_dict(db, t)
 
@@ -874,11 +914,25 @@ def install(app, sessions, engine, ready_user, get_db, state_model, user_model, 
         version = hashlib.sha256((assets / "manufacturing.js").read_bytes()).hexdigest()[:16]
         html = (assets / "manufacturing.html").read_text(encoding="utf-8")
         html = html.replace('/static/manufacturing.js"', f'/static/manufacturing.js?v={version}"')
+        for asset in ('inventory-restored.js', 'inventory-restored.css'):
+            digest = hashlib.sha256((assets / asset).read_bytes()).hexdigest()[:16]
+            html = html.replace(f'/static/{asset}"', f'/static/{asset}?v={digest}"')
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     @app.get("/static/manufacturing.js", include_in_schema=False)
     def script():
         return FileResponse(static_dir + "/manufacturing.js", media_type="application/javascript", headers={"Cache-Control": "no-store"})
+
+    @app.get('/static/inventory-restored.js', include_in_schema=False)
+    def restored_script():
+        return FileResponse(static_dir + '/inventory-restored.js', media_type='application/javascript', headers={'Cache-Control': 'no-store'})
+
+    @app.get('/static/inventory-restored.css', include_in_schema=False)
+    def restored_css():
+        return FileResponse(static_dir + '/inventory-restored.css', media_type='text/css', headers={'Cache-Control': 'no-store'})
+
+    from inventory_restore import install as install_restore
+    install_restore(app, ready_user, get_db, user_model)
 
     @app.get("/api/manufacturing/setup")
     def setup(u=Depends(ready_user), db=Depends(get_db)):
@@ -947,6 +1001,9 @@ def install(app, sessions, engine, ready_user, get_db, state_model, user_model, 
             fail("Isi permintaan harus objek.")
 
         def action(who):
+            from inventory_restore import COMMANDS, restore_command
+            if operation in COMMANDS:
+                return restore_command(db, who, operation, payload)
             from inventory_operations import OPERATIONS, handle
             if operation in OPERATIONS:
                 return handle(db, who, operation, payload)

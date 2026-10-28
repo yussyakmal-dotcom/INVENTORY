@@ -244,3 +244,22 @@ class TransferReceivedUnits(Base):
     __tablename__ = 'inv_transfer_received_units'
     receipt_id = Column(Integer, ForeignKey('inv_transfer_receipts.id'), primary_key=True)
     document = Column(BigText, nullable=False)
+
+
+class Profile(Base):
+    """Additive metadata; never a second stock ledger."""
+    __tablename__ = 'inv_profiles'
+    key = Column(String(100), primary_key=True)
+    document = Column(BigText, nullable=False, default='{}')
+    revision = Column(Integer, nullable=False, default=1)
+
+
+class Classification(Base):
+    __tablename__ = 'inv_classifications'
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(20), nullable=False)
+    name = Column(String(150), nullable=False)
+    parent_id = Column(Integer, ForeignKey('inv_classifications.id'))
+    active = Column(Boolean, nullable=False, default=True)
+    document = Column(Text, nullable=False, default='{}')
+    revision = Column(Integer, nullable=False, default=1)

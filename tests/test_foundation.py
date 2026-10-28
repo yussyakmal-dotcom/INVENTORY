@@ -409,9 +409,12 @@ def test_location_protect_products_stock_and_history(client):
     source = next(x for x in cat['warehouses'] if x['kind'] == 'central')
     assert cmd(client, 'delete-warehouse', source).status_code == 409
     assert cmd(client, 'save-warehouse', {**source, 'active': False}).status_code == 409
-    second = cmd(client, 'save-warehouse', {'code': 'C2', 'name': 'Central 2', 'kind': 'central'}).json()
+    assert cmd(client, 'save-warehouse', {'code': 'C2', 'name': 'Central 2', 'kind': 'central'}).status_code == 409
+    second = cmd(client, 'save-warehouse', {'code': 'S2', 'name': 'Store 2', 'kind': 'store'}).json()
     p = make_product(client)
-    receipt(client, second['id'], p['id'], qty='2')
+    receipt(client, source['id'], p['id'], qty='2')
+    inbound = cmd(client, 'ship', {'source_id': source['id'], 'destination_id': second['id'], 'product_id': p['id'], 'qty': '2', 'reference': 'TO-STORE'}).json()
+    assert cmd(client, 'receive-transfer', {'id': inbound['id'], 'lines': [{'id': x['id'], 'qty': x['remaining']} for x in inbound['lines']]}).status_code == 200
     assert cmd(client, 'delete-warehouse', second).status_code == 409
     assert cmd(client, 'save-warehouse', {**second, 'active': False}).status_code == 409
     transfer = cmd(client, 'ship', {'source_id': second['id'], 'destination_id': w['id'], 'product_id': p['id'], 'qty': '2', 'reference': 'TEST'}).json()
@@ -475,7 +478,7 @@ def test_transfer_documents_multiple_goods_receipt_dates_and_retry(client):
     assert final['receipts'][1]['received_date'] == inv.today().isoformat()
     assert sum(len(r['lines']) for r in final['receipts']) == 4
     assert cmd(client, 'receive-transfer', rest).status_code == 409
-    for field in ['shipped_date', 'document_number']:
+    for field in ['shipped_date']:
         invalid = {**body, 'document_number': 'SJ-003', field: ''}
         assert cmd(client, 'ship', invalid).status_code == 422
 
@@ -653,28 +656,28 @@ def count_fixture(client):
     return cat, p, wh, rows[0]
 
 
-def test_opname_freezes_stock_and_posts_difference_once(client):
+def test_opname_preserves_concurrent_movements_and_posts_difference_once(client):
     cat, p, wh, row = count_fixture(client)
     o = cmd(client, 'start-opname', {'number': 'OP-001', 'warehouse_id': wh, 'document_date': inv.today().isoformat()}).json()
     assert o['status'] == 'draft'
     assert cmd(client, 'start-opname', {'number': 'OP-002', 'warehouse_id': wh, 'document_date': inv.today().isoformat()}).status_code == 409
-    assert cmd(client, 'usage', {'warehouse_id': wh, 'product_id': p['id'], 'qty': '1', 'reference': 'BLOCKED'}).status_code == 409
-    assert cmd(client, 'ship', {'source_id': wh, 'destination_id': cat['kitchens'][0]['warehouse_id'], 'product_id': p['id'], 'qty': '1'}).status_code == 409
-    assert cmd(client, 'receipt', {'warehouse_id': wh, 'product_id': p['id']}).status_code == 409
+    assert cmd(client, 'usage', {'warehouse_id': wh, 'product_id': p['id'], 'qty': '1', 'reference': 'DURING-COUNT'}).status_code == 200
+    assert cmd(client, 'ship', {'source_id': wh, 'destination_id': cat['kitchens'][0]['warehouse_id'], 'product_id': p['id'], 'qty': '1'}).status_code == 200
+    assert cmd(client, 'receipt', {'warehouse_id': wh, 'product_id': p['id']}).status_code == 422
     b = {'id': o['id'], 'revision': o['revision'], 'counted_by': 'Penghitung', 'reason': 'Hitung fisik',
          'lines': [{'balance_id': row['balance_id'], 'counted_qty': '8'}],
          'new_lots': [{'product_id': p['id'], 'counted_qty': '2', 'batch_number': 'TEMUAN', 'unit_cost': '9000',
                        'expiry_date': (inv.today()-timedelta(days=1)).isoformat()}]}
     o = cmd(client, 'submit-opname', b).json()
     assert o['status'] == 'pending'
-    assert Decimal(client.get('/api/manufacturing/stock').json()[0]['qty']) == 10
+    assert Decimal(client.get('/api/manufacturing/stock').json()[0]['qty']) == 8
     token = key()
     decision = {'id': o['id'], 'revision': o['revision'], 'reason': 'Sesuai fisik'}
     result = cmd(client, 'approve-operation', decision, token)
     assert result.status_code == 200, result.text
     assert cmd(client, 'approve-operation', decision, token).json() == result.json()
     rows = client.get('/api/manufacturing/stock').json()
-    assert sum(Decimal(r['qty']) for r in rows) == 10
+    assert sum(Decimal(r['qty']) for r in rows) == 8
     assert next(r for r in rows if r['batch_number'] == 'TEMUAN')['usable'] is False
     assert len([m for m in client.get('/api/manufacturing/movements').json() if m['kind'] == 'OPNAME']) == 2
     assert cmd(client, 'usage', {'warehouse_id': wh, 'product_id': p['id'], 'qty': '1', 'reference': 'AFTER'}).status_code == 200
