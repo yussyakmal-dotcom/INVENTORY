@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from inventory_models import (Access, Audit, Balance, Base, Bom, Command, Control,
                               Kitchen, Lot, Movement, Product, Transfer,
-                              TransferLine, Warehouse, now)
+                              TransferLine, TransferDocument, TransferReceipt, TransferReceiptLine, Warehouse, now)
 
 KINDS = {"raw", "packaging", "wip", "finished", "package", "byproduct"}
 MADE = {"wip", "finished", "package", "byproduct"}
@@ -210,6 +210,12 @@ def initialize(engine, sessions):
                 if not db.query(Kitchen).filter_by(code=code).first():
                     db.add(Kitchen(code=code, name=name, kind="production" if i <= 10 else "packing", warehouse_id=wh.id))
             c.schema_version = 3
+        if c.schema_version < 4:
+            for transfer in db.query(Transfer):
+                if not db.get(TransferDocument, transfer.id):
+                    shipped = transfer.created_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Asia/Jakarta")).date()
+                    db.add(TransferDocument(transfer_id=transfer.id, document_number=f"TRF-{transfer.id}", shipped_date=shipped, legacy=True))
+            c.schema_version = 4
         db.commit()
 
 
@@ -680,32 +686,72 @@ def consume(db, user, body):
     return {"cost": str(cost), "picks": [{"lot_id": l.id, "qty": str(q)} for _, l, q in picks]}
 
 
+def document_date(value, name):
+    try:
+        if not isinstance(value, str) or len(value) != 10:
+            raise ValueError()
+        result = date.fromisoformat(value)
+        if result > today():
+            raise ValueError()
+        return result
+    except (ValueError, TypeError):
+        fail(f"{name} harus tanggal YYYY-MM-DD dan tidak boleh melewati hari ini.")
+
+
 def ship(db, user, body):
     src = warehouse_access(db, user, body.get("source_id"))
     dst = get(db, Warehouse, body.get("destination_id"))
     if not dst.active or src.id == dst.id:
         fail("Gudang tujuan harus aktif dan berbeda dari asal.")
-    p = get(db, Product, body.get("product_id"))
-    if not p.active:
-        fail("Produk tidak aktif.")
-    picks = fefo(db, p, src, body.get("qty"))
-    transfer = Transfer(source_id=src.id, destination_id=dst.id, reference=label(body.get("reference"), "Referensi", 150), created_by=user.id)
+    doc_no = label(body.get("document_number"), "Nomor dokumen kirim", 150).upper()
+    shipped_date = document_date(body.get("shipped_date"), "Tanggal kirim")
+    if db.query(TransferDocument).filter_by(document_number=doc_no).first():
+        fail("Nomor dokumen kirim sudah digunakan.", 409)
+    entries = body.get("lines")
+    if entries is None:  # Keep single-product API callers compatible.
+        entries = [{"product_id": body.get("product_id"), "qty": body.get("qty")}]
+    if not isinstance(entries, list) or not entries or len(entries) > 200:
+        fail("Isi 1–200 baris barang kiriman.")
+    picks, seen = [], set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            fail("Baris kiriman tidak valid.")
+        p = get(db, Product, entry.get("product_id"))
+        if not p.active or p.id in seen:
+            fail("Produk harus aktif dan tidak boleh berulang dalam dokumen.")
+        seen.add(p.id)
+        picks.extend(fefo(db, p, src, entry.get("qty")))
+    transfer = Transfer(source_id=src.id, destination_id=dst.id, reference=label(body.get("reference") or doc_no, "Referensi", 150), created_by=user.id)
     db.add(transfer)
     db.flush()
+    db.add(TransferDocument(transfer_id=transfer.id, document_number=doc_no, shipped_date=shipped_date))
     for balance, lot, qty in picks:
         balance.qty -= qty
         db.add(TransferLine(transfer_id=transfer.id, lot_id=lot.id, shipped_qty=qty, received_qty=0))
-        movement(db, balance, lot, -qty, "TRANSFER_OUT", f"TRF-{transfer.id}", user)
+        movement(db, balance, lot, -qty, "TRANSFER_OUT", doc_no, user)
     db.flush()
     return transfer_dict(db, transfer)
 
 
 def transfer_dict(db, t):
+    doc = db.get(TransferDocument, t.id)
+    lines = []
+    for line in db.query(TransferLine).filter_by(transfer_id=t.id).order_by(TransferLine.id):
+        lot = get(db, Lot, line.lot_id)
+        product = get(db, Product, lot.product_id)
+        lines.append({"id": line.id, "lot_id": lot.id, "product_id": product.id,
+                      "product_code": product.code, "product_name": product.name, "uom": product.base_uom,
+                      "batch_number": lot.batch_number, "expiry_date": str(lot.expiry_date) if lot.expiry_date else None,
+                      "shipped_qty": str(line.shipped_qty), "received_qty": str(line.received_qty),
+                      "remaining": str(line.shipped_qty - line.received_qty)})
+    receipts = [{"id": r.id, "received_date": str(r.received_date), "actor_id": r.actor_id,
+                 "recorded_at": str(r.created_at),
+                 "lines": [{"id": l.transfer_line_id, "qty": str(l.qty)} for l in db.query(TransferReceiptLine).filter_by(receipt_id=r.id)]}
+                for r in db.query(TransferReceipt).filter_by(transfer_id=t.id).order_by(TransferReceipt.id)]
     return {"id": t.id, "source_id": t.source_id, "destination_id": t.destination_id,
-            "reference": t.reference, "status": t.status,
-            "lines": [{"id": l.id, "lot_id": l.lot_id, "shipped_qty": str(l.shipped_qty),
-                       "received_qty": str(l.received_qty), "remaining": str(l.shipped_qty - l.received_qty)}
-                      for l in db.query(TransferLine).filter_by(transfer_id=t.id).order_by(TransferLine.id)]}
+            "reference": t.reference, "status": t.status, "document_number": doc.document_number,
+            "shipped_date": str(doc.shipped_date), "legacy": doc.legacy,
+            "receipts": receipts, "lines": lines}
 
 
 def receive_transfer(db, user, tid, body):
@@ -713,6 +759,13 @@ def receive_transfer(db, user, tid, body):
     warehouse_access(db, user, t.destination_id)
     if t.status == "received":
         fail("Transfer sudah diterima seluruhnya.", 409)
+    doc = get(db, TransferDocument, t.id)
+    received_date = document_date(body.get("received_date"), "Tanggal terima")
+    if received_date < doc.shipped_date:
+        fail("Tanggal terima tidak boleh sebelum tanggal kirim.")
+    receipt = TransferReceipt(transfer_id=t.id, received_date=received_date, actor_id=user.id)
+    db.add(receipt)
+    db.flush()
     lines = {l.id: l for l in db.query(TransferLine).filter_by(transfer_id=t.id)}
     entries = body.get("lines")
     if not isinstance(entries, list) or not entries:
@@ -742,12 +795,14 @@ def receive_transfer(db, user, tid, body):
             db.flush()
         bal.qty += qty
         line.received_qty += qty
+        db.add(TransferReceiptLine(receipt_id=receipt.id, transfer_line_id=line.id, qty=qty))
         total += qty
         # Physical receipt is allowed even if it expired in transit; FEFO blocks use.
-        movement(db, bal, lot, qty, "TRANSFER_IN", f"TRF-{t.id}", user)
+        movement(db, bal, lot, qty, "TRANSFER_IN", doc.document_number, user)
     if total == 0:
         fail("Jumlah diterima harus lebih dari nol.")
     t.status = "received" if all(l.shipped_qty == l.received_qty for l in lines.values()) else "partial"
+    db.flush()
     return transfer_dict(db, t)
 
 

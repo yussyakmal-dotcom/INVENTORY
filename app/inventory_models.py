@@ -129,6 +129,32 @@ class TransferLine(Base):
                       CheckConstraint("received_qty >= 0 AND received_qty <= shipped_qty"))
 
 
+class TransferDocument(Base):
+    __tablename__ = "inv_transfer_documents"
+    transfer_id = Column(Integer, ForeignKey("inv_transfers.id"), primary_key=True)
+    document_number = Column(String(150), nullable=False, unique=True)
+    shipped_date = Column(Date, nullable=False)
+    legacy = Column(Boolean, nullable=False, default=False)
+
+
+class TransferReceipt(Base):
+    __tablename__ = "inv_transfer_receipts"
+    id = Column(Integer, primary_key=True)
+    transfer_id = Column(Integer, ForeignKey("inv_transfers.id"), nullable=False, index=True)
+    received_date = Column(Date, nullable=False)
+    actor_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=now)
+
+
+class TransferReceiptLine(Base):
+    __tablename__ = "inv_transfer_receipt_lines"
+    id = Column(Integer, primary_key=True)
+    receipt_id = Column(Integer, ForeignKey("inv_transfer_receipts.id"), nullable=False)
+    transfer_line_id = Column(Integer, ForeignKey("inv_transfer_lines.id"), nullable=False)
+    qty = Column(Qty, nullable=False)
+    __table_args__ = (UniqueConstraint("receipt_id", "transfer_line_id"), CheckConstraint("qty > 0"))
+
+
 class Movement(Base):
     __tablename__ = "inv_movements"
     id = Column(Integer, primary_key=True)
@@ -159,3 +185,4 @@ class Command(Base):
     payload_hash = Column(String(64), nullable=False)
     response = Column(BigText, nullable=False)
     __table_args__ = (UniqueConstraint("actor_id", "operation", "request_key"),)
+

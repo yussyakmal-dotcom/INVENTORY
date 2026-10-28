@@ -76,3 +76,14 @@ Menu **Dapur** menyediakan daftar, tambah, ubah, dan hapus Gudang serta Dapur. M
 - Schema versi 3 menjalankan seed D01–D10/PACK hanya sekali. Restart tidak membuat ulang master yang sudah dihapus atau diganti kodenya.
 
 API: `save-warehouse`, `delete-warehouse`, `save-kitchen`, `delete-kitchen` melalui endpoint command yang sama. Update/delete wajib menyertakan `id` dan `version` dari catalog.
+
+## Dokumen kirim dan penerimaan transfer
+
+- Pengiriman wajib mencatat nomor dokumen unik (disimpan huruf besar) dan tanggal kirim. Satu dokumen dapat memuat beberapa barang; FEFO memecah barang menjadi baris lot/batch agar ketertelusuran tetap terjaga.
+- Penerimaan dipanggil berdasarkan nomor dokumen pada menu Transfer. Layar menampilkan tanggal kirim, gudang asal/tujuan, nama barang, batch, satuan, qty kirim, qty sudah diterima, dan sisa.
+- Tanggal penerimaan diisi sesuai kejadian fisik, default hari ini (Asia/Jakarta). Tanggal tidak boleh sebelum kirim atau di masa depan.
+- Qty terima default sama dengan sisa kiriman (penerimaan pertama sama dengan qty kirim), dapat dikurangi atau diisi nol per baris. Minimal satu baris positif. Jumlah melebihi sisa ditolak; kekurangan tetap dalam perjalanan.
+- Setiap penerimaan sebagian memiliki tanggal dan detail qty sendiri. Idempotency key mencegah pengulangan mutasi saat permintaan yang sama dicoba lagi. Tanggal dokumen terpisah dari timestamp pencatatan sistem; tanggal mundur tidak menghitung ulang saldo historis.
+- Schema versi 4 menambahkan tabel dokumen dan riwayat penerimaan tanpa mengubah saldo. Transfer lama mendapat nomor `TRF-ID` dan tanggal kirim dari timestamp pencatatan (WIB); referensi lama tetap tersimpan. Tanggal penerimaan lama tidak direkayasa.
+
+API `ship`: `document_number`, `shipped_date`, `source_id`, `destination_id`, `lines: [{product_id, qty}]`. Bentuk satu barang `product_id`/`qty` juga diterima, tetapi tanggal dan nomor dokumen tetap wajib. API `receive-transfer`: `id`, `received_date`, `lines: [{id, qty}]`, dengan `id` baris transfer (lot). Catalog transfer menyertakan detail barang dan `receipts` untuk seluruh riwayat penerimaan setelah pembaruan.

@@ -30,6 +30,10 @@ def key():
 
 
 def cmd(client, operation, body, request_key=None):
+    if operation == "ship":
+        body = {"document_number": body.get("reference", "TEST-DOC"), "shipped_date": inv.today().isoformat(), **body}
+    if operation == "receive-transfer":
+        body = {"received_date": inv.today().isoformat(), **body}
     return client.post("/api/manufacturing/commands/" + operation, json=body,
                        headers={"Idempotency-Key": request_key or key()})
 
@@ -429,3 +433,67 @@ def test_location_admin_only_and_idempotency(client):
         db.commit()
     for operation in ['save-warehouse', 'save-kitchen', 'delete-warehouse', 'delete-kitchen']:
         assert cmd(client, operation, {}).status_code == 403
+
+
+def test_transfer_documents_multiple_goods_receipt_dates_and_retry(client):
+    cat = activate(client)
+    wh, dest = central(cat), cat['kitchens'][0]['warehouse_id']
+    flour, sugar = make_product(client), make_product(client, 'SUGAR')
+    receipt(client, wh, flour['id'], qty='10')
+    receipt(client, wh, sugar['id'], qty='20')
+    yesterday = (inv.today() - timedelta(days=1)).isoformat()
+    body = {'source_id': wh, 'destination_id': dest, 'document_number': 'sj-001', 'shipped_date': yesterday,
+            'lines': [{'product_id': flour['id'], 'qty': '3'}, {'product_id': sugar['id'], 'qty': '5'}]}
+    token = key()
+    result = cmd(client, 'ship', body, token)
+    assert result.status_code == 200, result.text
+    t = result.json()
+    assert t['document_number'] == 'SJ-001' and t['shipped_date'] == yesterday
+    assert {x['product_code'] for x in t['lines']} == {'FLOUR', 'SUGAR'}
+    assert all(x['uom'] == 'kg' and x['batch_number'] == 'B1' for x in t['lines'])
+    assert cmd(client, 'ship', body, token).json() == t
+    assert cmd(client, 'ship', body).status_code == 409
+    before = client.get('/api/manufacturing/stock').json()
+    bad = {**body, 'document_number': 'SJ-002', 'lines': [{'product_id': flour['id'], 'qty': '1'}, {'product_id': sugar['id'], 'qty': '999'}]}
+    assert cmd(client, 'ship', bad).status_code == 409
+    assert client.get('/api/manufacturing/stock').json() == before
+    rbody = {'id': t['id'], 'received_date': yesterday, 'lines': [{'id': x['id'], 'qty': '1'} for x in t['lines']]}
+    assert cmd(client, 'receive-transfer', {**rbody, 'received_date': (inv.today()-timedelta(days=2)).isoformat()}).status_code == 422
+    assert cmd(client, 'receive-transfer', {**rbody, 'received_date': (inv.today()+timedelta(days=1)).isoformat()}).status_code == 422
+    assert cmd(client, 'receive-transfer', {**rbody, 'received_date': 'wrong'}).status_code == 422
+    rtoken = key()
+    first = cmd(client, 'receive-transfer', rbody, rtoken)
+    assert first.status_code == 200, first.text
+    assert first.json()['receipts'][0]['received_date'] == yesterday
+    assert cmd(client, 'receive-transfer', rbody, rtoken).json() == first.json()
+    part = first.json()
+    rest = {'id': t['id'], 'received_date': inv.today().isoformat(), 'lines': [{'id': x['id'], 'qty': x['remaining']} for x in part['lines']]}
+    final = cmd(client, 'receive-transfer', rest).json()
+    assert final['status'] == 'received'
+    assert len(final['receipts']) == 2
+    assert final['receipts'][1]['received_date'] == inv.today().isoformat()
+    assert sum(len(r['lines']) for r in final['receipts']) == 4
+    assert cmd(client, 'receive-transfer', rest).status_code == 409
+    for field in ['shipped_date', 'document_number']:
+        invalid = {**body, 'document_number': 'SJ-003', field: ''}
+        assert cmd(client, 'ship', invalid).status_code == 422
+
+
+def test_existing_transfer_document_upgrade_is_repeatable(client):
+    cat = activate(client)
+    with main.SessionLocal() as db:
+        t = m.Transfer(source_id=central(cat), destination_id=cat['kitchens'][0]['warehouse_id'],
+                       reference='OLD-REF', created_by=1, status='partial')
+        db.add(t)
+        db.flush()
+        tid = t.id
+        db.get(m.Control, 1).schema_version = 3
+        db.commit()
+    inv.initialize(main.engine, main.SessionLocal)
+    inv.initialize(main.engine, main.SessionLocal)
+    rows = client.get('/api/manufacturing/transfers').json()
+    assert len(rows) == 1
+    assert rows[0]['document_number'] == f'TRF-{tid}'
+    assert rows[0]['reference'] == 'OLD-REF' and rows[0]['legacy'] is True
+    assert rows[0]['receipts'] == []
+    assert rows[0]['shipped_date'] == inv.today().isoformat()
