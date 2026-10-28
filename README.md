@@ -103,3 +103,7 @@ Ikon disematkan langsung di aplikasi (SVG), jadi tetap tampil tanpa akses intern
 - Aturan bisnis (FIFO, reservasi TTL, hak akses per peran) dijalankan di browser. Server memverifikasi login,
   mencatat siapa yang menyimpan, dan menulis audit log dengan identitas dari sesi. Untuk produksi skala besar,
   langkah berikutnya adalah memindahkan aturan ini ke endpoint server dan tabel ternormalisasi.
+
+## Rancangan modul manufaktur
+
+Spesifikasi yang disusun dari keputusan 28 Oktober 2026 tersedia di [docs/manufacturing](docs/manufacturing/README.md): PRD, struktur database DBML, alur layar, rencana implementasi, dan skenario penerimaan. Ini adalah rancangan untuk pengembangan; fitur manufaktur belum dipasang pada aplikasi.

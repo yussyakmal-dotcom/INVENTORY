@@ -1,0 +1,419 @@
+// Target schema only; not a migration and not current deployed tables.
+// MariaDB; DECIMAL for quantities/costs; business dates Asia/Jakarta, event times UTC.
+// Cross-row invariants, stock locks and state transitions: see IMPLEMENTATION.md.
+Project inventory_manufacturing {
+  database_type: 'MySQL'
+  Note: 'Manufacturing specification v1.0, 2026-10-28'
+}
+
+Table users {
+  id bigint [pk]
+  username varchar(30) [not null, unique]
+  Note: 'Reference to existing authentication table; retain password/session implementation.'
+}
+
+Table warehouses {
+  id bigint [pk, increment]
+  code varchar(30) [not null, unique]
+  name varchar(100) [not null]
+  kind varchar(20) [not null, note: 'central/kitchen/packing/store']
+  active boolean [not null, default: true]
+}
+
+Table kitchens {
+  id bigint [pk, increment]
+  code varchar(10) [not null, unique]
+  name varchar(100) [not null]
+  kind varchar(20) [not null, note: 'production/packing']
+  warehouse_id bigint [not null, unique, ref: > warehouses.id]
+  active boolean [not null, default: true]
+  Note: 'Seed D01-D10, Dapur 1-Dapur 10; PACK independent of these 10.'
+}
+
+Table user_kitchen_permissions {
+  user_id bigint [not null, ref: > users.id]
+  kitchen_id bigint [not null, ref: > kitchens.id]
+  capability varchar(40) [not null]
+  indexes { (user_id, kitchen_id, capability) [pk] }
+}
+
+Table user_warehouse_permissions {
+  user_id bigint [not null, ref: > users.id]
+  warehouse_id bigint [not null, ref: > warehouses.id]
+  capability varchar(40) [not null]
+  indexes { (user_id, warehouse_id, capability) [pk] }
+}
+
+Table products {
+  id bigint [pk, increment]
+  code varchar(40) [not null, unique]
+  name varchar(150) [not null]
+  kind varchar(20) [not null, note: 'raw/packaging/wip/finished/package/byproduct']
+  base_uom varchar(20) [not null]
+  discrete boolean [not null, default: false]
+  shelf_life_days int [note: '>=0; required before production activation']
+  active_kitchen_id bigint [ref: > kitchens.id, note: 'One active production kitchen per product']
+  selling_price decimal(20,6) [not null, default: 0]
+  active boolean [not null, default: true]
+}
+
+Table product_uoms {
+  product_id bigint [not null, ref: > products.id]
+  uom varchar(20) [not null]
+  base_factor decimal(20,8) [not null, note: '>0']
+  indexes { (product_id, uom) [pk] }
+}
+
+Table product_kitchen_history {
+  id bigint [pk, increment]
+  product_id bigint [not null, ref: > products.id]
+  from_kitchen_id bigint [ref: > kitchens.id]
+  to_kitchen_id bigint [not null, ref: > kitchens.id]
+  changed_at datetime [not null]
+  changed_by bigint [not null, ref: > users.id]
+  reason text [not null]
+}
+
+Table boms {
+  id bigint [pk, increment]
+  product_id bigint [not null, ref: > products.id]
+  version int [not null]
+  status varchar(20) [not null, note: 'draft/active/retired']
+  standard_output_qty decimal(20,6) [not null, note: '>0 in product base UOM']
+  created_by bigint [not null, ref: > users.id]
+  approved_by bigint [ref: > users.id]
+  approved_at datetime
+  indexes { (product_id, version) [unique] }
+  Note: 'Enforce single active version with product row lock; referenced versions immutable.'
+}
+
+Table bom_materials {
+  id bigint [pk, increment]
+  bom_id bigint [not null, ref: > boms.id]
+  product_id bigint [not null, ref: > products.id]
+  qty decimal(20,6) [not null]
+  uom varchar(20) [not null]
+  base_factor decimal(20,8) [not null]
+  kind varchar(20) [not null, note: 'material/packaging']
+}
+
+Table bom_overheads {
+  id bigint [pk, increment]
+  bom_id bigint [not null, ref: > boms.id]
+  name varchar(100) [not null]
+  amount_per_batch decimal(20,6) [not null, default: 0, note: 'Must remain 0 in this release; nonstock']
+}
+
+Table bom_byproducts {
+  id bigint [pk, increment]
+  bom_id bigint [not null, ref: > boms.id]
+  product_id bigint [not null, ref: > products.id]
+  expected_base_qty decimal(20,6) [not null]
+  unit_cost decimal(20,8) [not null, default: 0, note: 'Always 0']
+}
+
+Table wip_buffer_policies {
+  warehouse_id bigint [not null, ref: > warehouses.id]
+  product_id bigint [not null, ref: > products.id]
+  minimum_qty decimal(20,6) [not null]
+  target_qty decimal(20,6) [not null, note: '>= minimum_qty >= 0']
+  active boolean [not null, default: true]
+  indexes { (warehouse_id, product_id) [pk] }
+}
+
+Table production_plans {
+  id bigint [pk, increment]
+  number varchar(40) [not null, unique]
+  plan_date date [not null]
+  status varchar(20) [not null]
+  created_by bigint [not null, ref: > users.id]
+  approved_by bigint [ref: > users.id]
+  approved_at datetime
+}
+
+Table plan_lines {
+  id bigint [pk, increment]
+  plan_id bigint [not null, ref: > production_plans.id]
+  source_type varchar(20) [not null, note: 'customer/store/buffer/manual']
+  source_reference varchar(120) [not null]
+  source_line_key varchar(120) [not null]
+  product_id bigint [not null, ref: > products.id]
+  destination_warehouse_id bigint [ref: > warehouses.id]
+  demand_qty decimal(20,6) [not null]
+  planned_qty decimal(20,6) [not null]
+  adjustment_reason text
+  Note: 'Track allocated outstanding demand across plans; do not enforce unique source if partial planning is legitimate.'
+}
+
+Table manufacturing_orders {
+  id bigint [pk, increment]
+  number varchar(40) [not null, unique]
+  product_id bigint [not null, ref: > products.id]
+  kitchen_id bigint [not null, ref: > kitchens.id]
+  warehouse_id bigint [not null, ref: > warehouses.id]
+  destination_warehouse_id bigint [ref: > warehouses.id]
+  bom_id bigint [not null, ref: > boms.id]
+  bom_snapshot json [not null, note: 'Material ratios/UOM, byproduct shelf lives and overhead']
+  shelf_life_days_snapshot int [not null]
+  target_qty decimal(20,6) [not null]
+  planned_date date [not null]
+  status varchar(30) [not null]
+  row_version int [not null, default: 1]
+  created_by bigint [not null, ref: > users.id]
+  approved_by bigint [ref: > users.id]
+  approved_at datetime
+  indexes { (kitchen_id, planned_date, status) }
+}
+
+Table mo_demand_allocations {
+  mo_id bigint [not null, ref: > manufacturing_orders.id]
+  plan_line_id bigint [not null, ref: > plan_lines.id]
+  qty decimal(20,6) [not null]
+  indexes { (mo_id, plan_line_id) [pk] }
+}
+
+Table work_orders {
+  id bigint [pk, increment]
+  number varchar(40) [not null, unique, note: 'Visible batch number for all outputs']
+  kitchen_id bigint [not null, ref: > kitchens.id]
+  warehouse_id bigint [not null, ref: > warehouses.id]
+  planned_date date [not null]
+  status varchar(30) [not null]
+  started_at datetime
+  completed_on date
+  submitted_by bigint [ref: > users.id]
+  approved_by bigint [ref: > users.id]
+  approved_at datetime
+  row_version int [not null, default: 1]
+}
+
+Table work_order_lines {
+  id bigint [pk, increment]
+  wo_id bigint [not null, ref: > work_orders.id]
+  mo_id bigint [not null, unique, ref: > manufacturing_orders.id]
+  good_qty decimal(20,6)
+  total_cost decimal(20,6)
+  unit_cost decimal(20,8)
+  loss_cost decimal(20,6) [not null, default: 0, note: 'All-output-loss case']
+  Note: 'Target/product/BOM from immutable approved MO; all lines share WO kitchen. Final results after posting.'
+}
+
+Table stock_lots {
+  id bigint [pk, increment]
+  product_id bigint [not null, ref: > products.id]
+  batch_number varchar(80) [not null, note: 'WO number for produced goods; supplier batch for receipts']
+  production_date date
+  expiry_date date
+  source_wo_line_id bigint [ref: > work_order_lines.id]
+  source_output_kind varchar(20) [note: 'normal/surplus/byproduct or null for receipts']
+  unit_cost decimal(20,8) [not null]
+  received_at datetime [not null]
+  status varchar(20) [not null, note: 'released/blocked']
+  indexes { (product_id, expiry_date, received_at) }
+  Note: 'Lot ID unique; visible WO batch is deliberately not unique. Transfers preserve lot identity.'
+}
+
+Table stock_positions {
+  id bigint [pk, increment]
+  lot_id bigint [not null, ref: > stock_lots.id]
+  location_key varchar(100) [not null, note: 'WH:<id>, TRANSIT:<transfer-id>, WO:<wo-id>']
+  warehouse_id bigint [ref: > warehouses.id]
+  custodian_wo_id bigint [ref: > work_orders.id]
+  qty decimal(20,6) [not null, default: 0, note: '>=0; movement ledger reconciles balance']
+  row_version int [not null, default: 1]
+  indexes { (lot_id, location_key) [unique] }
+}
+
+Table stock_reservations {
+  id bigint [pk, increment]
+  mo_id bigint [not null, ref: > manufacturing_orders.id]
+  position_id bigint [not null, ref: > stock_positions.id]
+  qty decimal(20,6) [not null]
+  status varchar(20) [not null, note: 'active/issued/released/expired']
+  created_at datetime [not null]
+  indexes { (position_id, status) }
+}
+
+Table material_requests {
+  id bigint [pk, increment]
+  number varchar(40) [not null, unique]
+  source_warehouse_id bigint [not null, ref: > warehouses.id]
+  destination_warehouse_id bigint [not null, ref: > warehouses.id]
+  status varchar(20) [not null]
+  requested_by bigint [not null, ref: > users.id]
+  approved_by bigint [ref: > users.id]
+}
+
+Table material_request_lines {
+  id bigint [pk, increment]
+  request_id bigint [not null, ref: > material_requests.id]
+  mo_id bigint [ref: > manufacturing_orders.id]
+  product_id bigint [not null, ref: > products.id]
+  requested_qty decimal(20,6) [not null]
+  approved_qty decimal(20,6)
+}
+
+Table stock_transfers {
+  id bigint [pk, increment]
+  number varchar(40) [not null, unique]
+  source_warehouse_id bigint [not null, ref: > warehouses.id]
+  destination_warehouse_id bigint [not null, ref: > warehouses.id]
+  status varchar(30) [not null]
+  shipped_by bigint [ref: > users.id]
+  shipped_at datetime
+  received_by bigint [ref: > users.id]
+  received_at datetime
+}
+
+Table stock_transfer_lines {
+  id bigint [pk, increment]
+  transfer_id bigint [not null, ref: > stock_transfers.id]
+  request_line_id bigint [ref: > material_request_lines.id]
+  lot_id bigint [not null, ref: > stock_lots.id]
+  shipped_qty decimal(20,6) [not null]
+  received_qty decimal(20,6) [not null, default: 0]
+  resolved_difference_qty decimal(20,6) [not null, default: 0]
+  Note: 'Unresolved transit = shipped - received - resolved; settlements have audit and movement references.'
+}
+
+Table wo_material_issues {
+  id bigint [pk, increment]
+  wo_line_id bigint [not null, ref: > work_order_lines.id]
+  source_position_id bigint [not null, ref: > stock_positions.id]
+  custody_position_id bigint [not null, ref: > stock_positions.id]
+  lot_id bigint [not null, ref: > stock_lots.id]
+  issued_qty decimal(20,6) [not null]
+  unit_cost_snapshot decimal(20,8) [not null]
+  kind varchar(20) [not null, note: 'initial/additional']
+  reason text
+  issued_by bigint [not null, ref: > users.id]
+  issued_at datetime [not null]
+  Note: 'Different WO products cannot consume the same issued quantity twice.'
+}
+
+Table production_reports {
+  id bigint [pk, increment]
+  wo_id bigint [not null, ref: > work_orders.id]
+  revision int [not null]
+  completed_on date [not null]
+  status varchar(20) [not null, note: 'draft/submitted/returned/posted']
+  submitted_by bigint [ref: > users.id]
+  approved_by bigint [ref: > users.id]
+  approved_at datetime
+  return_reason text
+  indexes { (wo_id, revision) [unique] }
+}
+
+Table production_report_lines {
+  id bigint [pk, increment]
+  report_id bigint [not null, ref: > production_reports.id]
+  wo_line_id bigint [not null, ref: > work_order_lines.id]
+  good_qty decimal(20,6) [not null]
+  notes text
+  indexes { (report_id, wo_line_id) [unique] }
+}
+
+Table production_material_actuals {
+  report_id bigint [not null, ref: > production_reports.id]
+  issue_id bigint [not null, ref: > wo_material_issues.id]
+  consumed_qty decimal(20,6) [not null]
+  returned_qty decimal(20,6) [not null]
+  lost_qty decimal(20,6) [not null, default: 0]
+  loss_reason text
+  indexes { (report_id, issue_id) [pk] }
+  Note: 'consumed + returned + lost = issued; final report must include every issue once.'
+}
+
+Table production_byproduct_actuals {
+  report_line_id bigint [not null, ref: > production_report_lines.id]
+  product_id bigint [not null, ref: > products.id]
+  qty decimal(20,6) [not null]
+  indexes { (report_line_id, product_id) [pk] }
+  Note: 'UOM/shelf life from MO BOM snapshot; unit cost always zero.'
+}
+
+Table production_outputs {
+  id bigint [pk, increment]
+  report_line_id bigint [not null, ref: > production_report_lines.id]
+  lot_id bigint [not null, unique, ref: > stock_lots.id]
+  kind varchar(20) [not null, note: 'normal/surplus/byproduct']
+  qty decimal(20,6) [not null]
+  total_value decimal(20,6) [not null, note: 'Explicit value preserves rounding reconciliation']
+}
+
+Table production_scraps {
+  id bigint [pk, increment]
+  report_line_id bigint [not null, unique, ref: > production_report_lines.id]
+  qty decimal(20,6) [not null]
+  tag varchar(80) [not null, default: 'Rusak dalam produksi']
+  deduct_good_stock boolean [not null, default: false]
+  Note: 'Output shortfall; not a second stock deduction. Cost already absorbed in good output or loss_cost.'
+}
+
+Table wo_cost_components {
+  id bigint [pk, increment]
+  wo_line_id bigint [not null, ref: > work_order_lines.id]
+  kind varchar(20) [not null, note: 'material/packaging/overhead']
+  reference_key varchar(100) [not null]
+  amount decimal(20,6) [not null]
+  Note: 'Net actual consumed/lost quantities; returned materials excluded; overhead 0.'
+}
+
+Table stock_movements {
+  id bigint [pk, increment]
+  posting_key varchar(150) [not null, unique]
+  position_id bigint [not null, ref: > stock_positions.id]
+  wo_line_id bigint [ref: > work_order_lines.id]
+  transfer_line_id bigint [ref: > stock_transfer_lines.id]
+  kind varchar(30) [not null]
+  qty_delta decimal(20,6) [not null]
+  value_delta decimal(20,6) [not null]
+  reference_type varchar(40) [not null]
+  reference_id varchar(100) [not null]
+  reversal_of_id bigint [ref: > stock_movements.id]
+  actor_id bigint [not null, ref: > users.id]
+  created_at datetime [not null]
+  indexes { (position_id, created_at) }
+  Note: 'Append-only. Production scrap shortfall creates no second negative good-stock movement.'
+}
+
+Table customer_dispatches {
+  id bigint [pk, increment]
+  number varchar(40) [not null, unique]
+  warehouse_id bigint [not null, ref: > warehouses.id]
+  customer_reference varchar(120) [not null]
+  order_reference varchar(120)
+  status varchar(20) [not null]
+  dispatched_at datetime
+  dispatched_by bigint [ref: > users.id]
+}
+
+Table customer_dispatch_lines {
+  id bigint [pk, increment]
+  dispatch_id bigint [not null, ref: > customer_dispatches.id]
+  lot_id bigint [not null, ref: > stock_lots.id]
+  qty decimal(20,6) [not null]
+}
+
+Table idempotency_requests {
+  id bigint [pk, increment]
+  actor_id bigint [not null, ref: > users.id]
+  operation varchar(60) [not null]
+  request_key varchar(100) [not null]
+  payload_hash varchar(64) [not null]
+  response_json json
+  created_at datetime [not null]
+  indexes { (actor_id, operation, request_key) [unique] }
+}
+
+Table audit_events {
+  id bigint [pk, increment]
+  actor_id bigint [not null, ref: > users.id]
+  action varchar(60) [not null]
+  entity_type varchar(60) [not null]
+  entity_id varchar(100) [not null]
+  before_json json
+  after_json json
+  reason text
+  created_at datetime [not null]
+}
