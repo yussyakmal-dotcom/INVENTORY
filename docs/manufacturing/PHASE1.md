@@ -95,3 +95,7 @@ Pengiriman baru wajib mengisi `sender_name` (nama petugas pengirim, maksimal 150
 Pilih nomor dokumen di menu Transfer lalu tekan **Cetak DO**. Dialog cetak browser dapat digunakan untuk printer atau Simpan sebagai PDF. Format A4 memuat nomor/tanggal DO, gudang asal/tujuan, pengirim, kendaraan, barang per batch, satuan, qty kirim, tempat tanda tangan, dan riwayat penerimaan beserta nama petugas jika sudah ada. Cetak tidak mengubah stok maupun status dokumen.
 
 Schema versi 5 menambahkan tabel identitas pengiriman dan penerimaan tanpa mengubah transaksi lama. Identitas yang belum pernah dicatat ditampilkan sebagai **Belum tercatat**, bukan diambil otomatis dari akun pengguna.
+
+### Pembaruan tampilan
+
+Halaman manufaktur menggunakan URL JavaScript dengan hash isi file dan header `no-store`, sehingga reload setelah update mengambil tampilan yang sesuai. Tab yang sudah terbuka sebelum update tetap perlu dimuat ulang. Jika server meminta nama pengirim tetapi kolomnya tidak muncul, lakukan hard refresh (Ctrl+Shift+R), lalu perbarui/rebuild aplikasi bila masih memakai berkas lama. Tombol Cetak DO berada pada detail dokumen setelah memilih nomor pengiriman.

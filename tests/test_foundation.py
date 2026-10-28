@@ -554,3 +554,18 @@ def test_do_identity_upgrade_does_not_invent_legacy_names(client):
     assert old['sender_name'] is None and old['vehicle_number'] is None
     assert old['receipts'][0]['receiver_name'] is None
     assert old['status'] == 'partial' and float(old['lines'][0]['remaining']) == 1
+
+
+
+def test_manufacturing_page_versions_script_and_disables_cache(client):
+    import hashlib
+    import re
+    page = client.get('/manufacturing')
+    assert page.status_code == 200 and page.headers['cache-control'] == 'no-store'
+    url = re.search(r'src="(/static/manufacturing.js\?v=[0-9a-f]+)"', page.text).group(1)
+    script = client.get(url)
+    assert script.headers['cache-control'] == 'no-store'
+    assert url.endswith(hashlib.sha256(script.content).hexdigest()[:16])
+    assert "input('sender_name'" in script.text
+    assert "input('vehicle_number'" in script.text
+    assert 'Cetak DO' in script.text

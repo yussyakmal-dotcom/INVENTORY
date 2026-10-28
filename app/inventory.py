@@ -5,13 +5,14 @@ deliberately conservative: correctness across workers before fine-grained locks.
 """
 import hashlib
 import json
+from pathlib import Path
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 
@@ -822,11 +823,16 @@ def receive_transfer(db, user, tid, body):
 def install(app, sessions, engine, ready_user, get_db, state_model, user_model, static_dir):
     @app.get("/manufacturing", include_in_schema=False)
     def page():
-        return FileResponse(static_dir + "/manufacturing.html", headers={"Cache-Control": "no-cache"})
+        # A content-based URL prevents cached JavaScript from lagging behind API updates.
+        assets = Path(static_dir)
+        version = hashlib.sha256((assets / "manufacturing.js").read_bytes()).hexdigest()[:16]
+        html = (assets / "manufacturing.html").read_text(encoding="utf-8")
+        html = html.replace('/static/manufacturing.js"', f'/static/manufacturing.js?v={version}"')
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     @app.get("/static/manufacturing.js", include_in_schema=False)
     def script():
-        return FileResponse(static_dir + "/manufacturing.js", media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+        return FileResponse(static_dir + "/manufacturing.js", media_type="application/javascript", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/manufacturing/setup")
     def setup(u=Depends(ready_user), db=Depends(get_db)):
