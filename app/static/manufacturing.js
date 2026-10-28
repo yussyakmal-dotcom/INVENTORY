@@ -103,6 +103,7 @@ function renderTransferReceipt(){
 function printDeliveryOrder(id){
   const t=transfers.find(t=>t.id===id);if(!t)throw Error('Dokumen tidak ditemukan.');
   let area=$('#do-print');if(!area){area=document.createElement('article');area.id='do-print';document.body.append(area);}
+  area.className='';
   area.innerHTML=`<h1>DELIVERY ORDER (DO)</h1><h2>${esc(t.document_number)}</h2><div class="do-meta"><p><strong>Tanggal kirim:</strong> ${esc(t.shipped_date)}<br><strong>Gudang asal:</strong> ${esc(nameOf(catalog.warehouses,t.source_id))}<br><strong>Gudang tujuan:</strong> ${esc(nameOf(catalog.warehouses,t.destination_id))}</p><p><strong>Petugas pengirim:</strong> ${esc(t.sender_name||'Belum tercatat')}<br><strong>Nomor kendaraan:</strong> ${esc(t.vehicle_number||'Belum tercatat')}</p></div>${t.shipment_units?`<p>${Object.entries(t.shipment_units).map(([pid,u])=>esc(nameOf(catalog.products,pid))+': '+esc(u.qty)+' '+esc(u.uom)+' = '+esc(u.base_qty)+' '+esc(u.base_uom)).join('<br>')}</p>`:''}${table(['No.','Kode / barang','Batch / ED','Satuan','Qty kirim'],t.lines.map((l,i)=>`<tr><td>${i+1}</td><td>${esc(l.product_code)}<br>${esc(l.product_name)}</td><td>${esc(l.batch_number)}<br>${esc(l.expiry_date||'—')}</td><td>${esc(l.uom)}</td><td>${esc(l.shipped_qty)}</td></tr>`))}<div class="do-signatures"><div><p>Petugas pengirim</p><div class="signature-space"></div><p>${esc(t.sender_name||'________________________')}</p></div><div><p>Petugas penerima</p><div class="signature-space"></div><p>Nama: ________________________<br>Tanggal: ______________________</p></div></div>${t.receipts.length?`<h3>Riwayat penerimaan tercatat</h3>${table(['Tanggal terima','Petugas penerima','Barang / batch','Qty terima'],t.receipts.flatMap(r=>r.lines.map(l=>{const item=t.lines.find(x=>x.id===l.id);return `<tr><td>${esc(r.received_date)}</td><td>${esc(r.receiver_name||'Belum tercatat')}</td><td>${esc(item?.product_name)} · ${esc(item?.batch_number)}</td><td>${esc(l.input_qty??l.qty)} ${esc(l.input_uom||item?.uom)}<small>Stok: ${esc(l.qty)} ${esc(item?.uom)}</small></td></tr>`;})))}`:''}<p class="do-note">Dicetak dari dokumen pengiriman yang tersimpan. Qty kirim tetap menunjukkan jumlah pengiriman awal.</p>`;
   window.print();
 }
@@ -123,10 +124,27 @@ const canPurchase=()=>['admin','purchasing'].includes(catalog.user.role);
 const canApprove=()=>['admin','approver'].includes(catalog.user.role);
 const operationLabels={draft:'Draft',pending:'Menunggu persetujuan',approved:'Disetujui',partial:'Diterima sebagian',received:'Diterima seluruhnya',closed:'Ditutup',posted:'Diposting',rejected:'Ditolak',cancelled:'Dibatalkan'};
 function printablePo(o){return o.kind==='po'&&['approved','partial','received','closed'].includes(o.status)&&o.approved_by!=null;}
+// Decimal arithmetic keeps printed line totals independent of binary floating-point rounding.
+function printDecimal(value){
+ const m=String(value).match(/^([+-]?)(\d+)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/);
+ if(!m)throw Error('Angka dokumen tidak valid.');
+ const fraction=m[3]||'';let n=BigInt((m[1]||'')+m[2]+fraction),scale=fraction.length-Number(m[4]||0);
+ if(scale<0){n*=10n**BigInt(-scale);scale=0;}
+ return {n,scale};
+}
+function printNumber(value,money=false){
+ let {n,scale}=typeof value==='object'?value:printDecimal(value);
+ if(money&&scale>2){const div=10n**BigInt(scale-2);n=(n+div/2n)/div;scale=2;}
+ let digits=n.toString().padStart(scale+1,'0');
+ let whole=scale?digits.slice(0,-scale):digits,frac=scale?digits.slice(-scale).replace(/0+$/,''):'';
+ return (money?'Rp ':'')+whole.replace(/\B(?=(\d{3})+(?!\d))/g,'.')+(frac?','+frac:'');
+}
+function printLineTotal(line){const q=printDecimal(line.purchase_qty||line.qty),p=printDecimal(line.purchase_price??line.unit_price);return printNumber({n:q.n*p.n,scale:q.scale+p.scale},true);}
 function printPurchaseOrder(id){
  const o=operations.documents.find(o=>o.id===id);if(!o||!printablePo(o))throw Error('PO harus disetujui sebelum dicetak.');
  let area=$('#do-print');if(!area){area=document.createElement('article');area.id='do-print';document.body.append(area);}
- area.innerHTML=`<h1>PURCHASE ORDER (PO)</h1><h2>${esc(o.number)}</h2><div class="do-meta"><p>Tanggal: ${esc(o.document_date)}<br>Supplier: ${esc(o.data.supplier_code)} · ${esc(o.data.supplier_name)}<br>Gudang tujuan: ${esc(nameOf(catalog.warehouses,o.warehouse_id))}</p><p>Status: ${esc(operationLabels[o.status])}<br>Disetujui akun #${o.approved_by}<br>Keputusan terakhir: ${esc(o.decided_at||'')} UTC</p></div>${table(['Produk','Qty beli','Satuan beli','Harga/satuan beli','Setara stok'],o.data.lines.map(l=>`<tr><td>${esc(l.code)}<br>${esc(l.name)}</td><td>${esc(l.purchase_qty||l.qty)}</td><td>${esc(poPurchaseUnit(l))}</td><td>${esc(l.purchase_price??l.unit_price)}</td><td>${esc(l.qty)} ${esc(l.uom)}</td></tr>`))}<p><strong>Total PO: Rp ${esc(o.data.total)}</strong></p><p class="do-note">Nilai barang sebelum pajak/ongkir. Dicetak dari PO tersimpan yang sudah disetujui.</p><div class="do-signatures"><div>Pemesan<div class="signature-space"></div>________________________</div><div>Supplier<div class="signature-space"></div>________________________</div></div>`;
+ area.className='po-document';
+ area.innerHTML=`<h1>PURCHASE ORDER</h1><h2>NO PO <span class="po-number">: ${esc(o.number)}</span></h2><div class="po-information"><p>Tanggal: ${esc(o.document_date)}</p><div class="po-parties"><p>Supplier : ${esc(o.data.supplier_code)} · ${esc(o.data.supplier_name)}</p><p>Gudang tujuan: ${esc(nameOf(catalog.warehouses,o.warehouse_id))}</p></div></div><table class="po-items"><colgroup><col style="width:6%"><col style="width:40%"><col style="width:8%"><col style="width:12%"><col style="width:17%"><col style="width:17%"></colgroup><thead><tr><th>NO</th><th>NAMA BARANG</th><th>QTY</th><th>SATUAN</th><th>HARGA</th><th>TOTAL</th></tr></thead><tbody>${o.data.lines.map((l,i)=>`<tr><td class="po-center">${i+1}</td><td>${esc(l.code)} ${esc(l.name)}</td><td class="po-center">${esc(printNumber(l.purchase_qty||l.qty))}</td><td class="po-center">${esc(poPurchaseUnit(l))}</td><td class="po-money">${esc(printNumber(l.purchase_price??l.unit_price,true))}</td><td class="po-money">${esc(printLineTotal(l))}</td></tr>`).join('')}<tr class="po-spacer"><td>&nbsp;</td><td></td><td></td><td></td><td></td><td></td></tr><tr class="po-total"><td></td><td>TOTAL</td><td></td><td></td><td></td><td class="po-money">${esc(printNumber(o.data.total,true))}</td></tr></tbody></table><div class="po-approval"><p>Disetujui oleh</p><p class="po-signature">( <span></span> )</p></div>`;
  window.print();
 }
 function operationTable(kind){return table(['Nomor / tanggal','Gudang','Status',''],operations.documents.filter(o=>o.kind===kind).map(o=>`<tr><td>${esc(o.number)}<small>${esc(o.document_date)}</small></td><td>${esc(nameOf(catalog.warehouses,o.warehouse_id))}</td><td>${esc(operationLabels[o.status])}</td><td><button data-action="ops-open" data-id="${o.id}">Buka</button> ${kind==='po'&&printablePo(o)?`<button data-action="ops-print-po" data-id="${o.id}">Cetak</button>`:''}</td></tr>`));}

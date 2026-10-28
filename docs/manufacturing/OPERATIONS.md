@@ -63,7 +63,7 @@ UI menampilkan Qty beli, Satuan beli, Harga/satuan beli, dan Setara stok dasar. 
 
 ## Cetak PO yang disetujui
 
-Tombol **Cetak** ada di sebelah **Buka** pada daftar PO, hanya setelah persetujuan (status Disetujui, Diterima sebagian, Diterima seluruhnya, atau Ditutup). Draft, menunggu persetujuan, ditolak, dan dibatalkan tidak dapat dicetak sebagai PO resmi. Format A4 memuat nomor/tanggal, supplier, gudang tujuan, status, akun persetujuan, qty/satuan beli, harga, konversi stok, total, dan tempat tanda tangan. Mencetak tidak memposting ulang transaksi. Dialog browser bisa digunakan untuk printer atau Simpan sebagai PDF.
+Tombol **Cetak** ada di sebelah **Buka** pada daftar PO, hanya setelah persetujuan (status Disetujui, Diterima sebagian, Diterima seluruhnya, atau Ditutup). Draft, menunggu persetujuan, ditolak, dan dibatalkan tidak dapat dicetak sebagai PO resmi. Format A4 mengikuti contoh PO: judul PURCHASE ORDER dan nomor PO di tengah, tanggal, supplier di kiri, gudang tujuan di kanan, tabel NO / NAMA BARANG / QTY / SATUAN / HARGA / TOTAL, baris grand total, serta tempat tanda tangan Disetujui oleh. Qty dan harga memakai satuan beli tersimpan. Harga dan total memakai format rupiah Indonesia. Total per baris dihitung dengan aritmetika desimal; grand total berasal dari nilai PO tersimpan, bukan angka pada contoh layout. Konversi stok dan rincian akun persetujuan tetap ada pada layar aplikasi, tidak ditambahkan ke format cetak ini. Mencetak tidak memposting ulang transaksi. Dialog browser bisa digunakan untuk printer atau Simpan sebagai PDF.
 
 ## Satuan transfer dan penerimaan langsung
 
