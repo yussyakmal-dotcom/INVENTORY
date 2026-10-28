@@ -362,3 +362,70 @@ def test_wip_bom_activates_without_master_kitchen(client):
     b = bom(client, p['id'], raw['id'])
     assert p['kitchen_id'] is None
     assert cmd(client, 'activate-bom', {'id': b['id']}).status_code == 200
+
+
+def test_location_crud_versions_and_restart(client):
+    cat = activate(client)
+    w = cmd(client, 'save-warehouse', {'code': 'new', 'name': 'Gudang baru', 'kind': 'kitchen'}).json()
+    assert w['code'] == 'NEW'
+    k = cmd(client, 'save-kitchen', {'code': 'D11', 'name': 'Dapur 11', 'kind': 'production', 'warehouse_id': w['id']}).json()
+    assert 'version' in k
+    assert cmd(client, 'save-kitchen', {**k, 'id': None, 'code': 'D12'}).status_code == 409
+    assert cmd(client, 'save-warehouse', {**w, 'id': None}).status_code == 409
+    assert cmd(client, 'save-kitchen', {**k, 'kind': 'packing'}).status_code == 422
+    assert cmd(client, 'delete-warehouse', w).status_code == 409
+    updated = cmd(client, 'save-kitchen', {**k, 'name': 'Dapur baru'}).json()
+    assert updated['name'] == 'Dapur baru'
+    assert cmd(client, 'save-kitchen', {**k, 'name': 'Stale'}).status_code == 409
+    assert cmd(client, 'delete-kitchen', k).status_code == 409
+    assert cmd(client, 'delete-kitchen', updated).status_code == 200
+    changed = cmd(client, 'save-warehouse', {**w, 'active': False}).json()
+    assert changed['active'] is False
+    assert cmd(client, 'delete-warehouse', w).status_code == 409
+    assert cmd(client, 'delete-warehouse', changed).status_code == 200
+    seeded = cat['kitchens'][0]
+    assert cmd(client, 'delete-kitchen', seeded).status_code == 200
+    wh = next(x for x in cat['warehouses'] if x['id'] == seeded['warehouse_id'])
+    assert cmd(client, 'delete-warehouse', wh).status_code == 200
+    inv.initialize(main.engine, main.SessionLocal)
+    cat = client.get('/api/manufacturing/catalog').json()
+    assert all(x['code'] != seeded['code'] for x in cat['kitchens'])
+    assert all(x['code'] != wh['code'] for x in cat['warehouses'])
+
+
+def test_location_protect_products_stock_and_history(client):
+    cat = activate(client)
+    k = cat['kitchens'][0]
+    w = next(x for x in cat['warehouses'] if x['id'] == k['warehouse_id'])
+    make_product(client, 'BREAD', kind='finished', shelf_life_days=3, kitchen_id=k['id'])
+    assert cmd(client, 'delete-kitchen', k).status_code == 409
+    assert cmd(client, 'save-warehouse', {**w, 'active': False}).status_code == 409
+    assert cmd(client, 'save-warehouse', {**w, 'kind': 'store'}).status_code == 409
+    source = next(x for x in cat['warehouses'] if x['kind'] == 'central')
+    assert cmd(client, 'delete-warehouse', source).status_code == 409
+    assert cmd(client, 'save-warehouse', {**source, 'active': False}).status_code == 409
+    second = cmd(client, 'save-warehouse', {'code': 'C2', 'name': 'Central 2', 'kind': 'central'}).json()
+    p = make_product(client)
+    receipt(client, second['id'], p['id'], qty='2')
+    assert cmd(client, 'delete-warehouse', second).status_code == 409
+    assert cmd(client, 'save-warehouse', {**second, 'active': False}).status_code == 409
+    transfer = cmd(client, 'ship', {'source_id': second['id'], 'destination_id': w['id'], 'product_id': p['id'], 'qty': '2', 'reference': 'TEST'}).json()
+    assert cmd(client, 'save-warehouse', {**second, 'active': False}).status_code == 409
+    assert cmd(client, 'receive-transfer', {'id': transfer['id'], 'lines': [{'id': x['id'], 'qty': x['remaining']} for x in transfer['lines']]}).status_code == 200
+    assert cmd(client, 'delete-warehouse', second).status_code == 409
+    assert cmd(client, 'save-warehouse', {**second, 'active': False}).status_code == 200
+
+
+def test_location_admin_only_and_idempotency(client):
+    activate(client)
+    body = {'code': 'TEST', 'name': 'Test', 'kind': 'store'}
+    token = key()
+    first = cmd(client, 'save-warehouse', body, token)
+    assert first.status_code == 200
+    assert cmd(client, 'save-warehouse', body, token).json() == first.json()
+    with main.SessionLocal() as db:
+        u = db.query(main.User).filter_by(username='admin').one()
+        u.role = 'gudang'
+        db.commit()
+    for operation in ['save-warehouse', 'save-kitchen', 'delete-warehouse', 'delete-kitchen']:
+        assert cmd(client, operation, {}).status_code == 403

@@ -1,6 +1,7 @@
 'use strict';
 let catalog, setup, stock = [], transfers = [], movements = [], users = [], accesses = [];
 let tab = 'setup', editProduct = null, editBom = null, busy = false;
+let editWarehouse = null, editKitchen = null;
 let bomMaterials = [], bomByproducts = [], bomOverheads = [];
 const $ = s => document.querySelector(s);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -62,7 +63,17 @@ function renderSetup(){
   const p=setup.preview;
   return `<section><h2>Persiapan manufaktur</h2><p>Dapur dan tabel baru sudah disiapkan. Data operasional lama belum dipindahkan.</p><div class="notice">Aktivasi memindahkan saldo ke server dan mengunci perubahan pada aplikasi lama. Setelah aktivasi, gunakan layar ini untuk master, penerimaan, pemakaian, dan transfer. Planning/MO/WO, purchasing, opname dan approval scrap belum tersedia di mode baru. Lakukan pada salinan pengujian terlebih dahulu.</div><div class="grid"><div><span class="stat">${p.products}</span><p class="muted">Produk lama</p></div><div><span class="stat">${p.lots}</span><p class="muted">Lot bersaldo</p></div><div><span class="stat">${esc(p.stock_value)}</span><p class="muted">Nilai stok sumber</p></div></div>${p.missing_expiry?`<p class="danger">${p.missing_expiry} lot tanpa ED akan diblokir sampai tanggalnya dilengkapi.</p>`:''}${p.blockers.length?`<h3>Perlu diselesaikan pada aplikasi lama</h3><ul>${p.blockers.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>`:'<p>Transaksi sumber siap untuk dipindahkan.</p>'}<form data-form="activate"><label><input type="checkbox" name="ack" required> Saya sudah membuat backup database dan memahami perubahan mode aplikasi.</label><div class="actions"><button class="primary" ${p.blockers.length?'disabled':''}>Aktifkan fondasi server</button><a href="/">Kembali ke inventori lama</a></div></form></section>`;
 }
-function renderKitchens(){return `<section><h2>Dapur & gudang</h2><p class="muted">Setiap dapur memiliki gudang sendiri. Packing berdiri terpisah untuk transit dan perakitan paket.</p><div class="grid">${catalog.kitchens.map(k=>`<div class="card kitchen"><span class="code">${esc(k.code)}</span><div><strong>${esc(k.name)}</strong><p class="muted">${esc(nameOf(catalog.warehouses,k.warehouse_id))}</p><span class="chip">${catalog.products.filter(p=>p.kitchen_id===k.id).length} produk</span></div></div>`).join('')}</div></section>`;}
+const warehouseKinds = {central:'Central',store:'Toko',kitchen:'Gudang dapur',packing:'Gudang packing'};
+function locationActions(type, item){return isAdmin()?`<button data-action="edit-${type}" data-id="${item.id}">Ubah</button> <button data-action="delete-${type}" data-id="${item.id}">Hapus</button>`:'';}
+function locationForm(type, item){
+  const kitchen=type==='kitchen', title=kitchen?'dapur':'gudang';
+  const types=kitchen?{production:'Produksi',packing:'Packing'}:warehouseKinds;
+  return `<section><h3>${item?'Ubah':'Tambah'} ${title}</h3><form data-form="${type}"><div class="grid">${field('Kode',input('code',item?.code,'text',`required maxlength="${kitchen?10:50}"`))}${field('Nama',input('name',item?.name,'text',`required maxlength="${kitchen?100:200}"`))}${field('Jenis',`<select name="kind">${Object.entries(types).map(([v,l])=>`<option value="${v}" ${item?.kind===v?'selected':''}>${l}</option>`).join('')}</select>`)}${kitchen?field('Gudang milik dapur',select('warehouse_id',catalog.warehouses.filter(w=>w.active&&['kitchen','packing'].includes(w.kind)&&!catalog.kitchens.some(k=>k.warehouse_id===w.id&&k.id!==item?.id)),item?.warehouse_id)):''}</div>${!kitchen?`<p><label><input type="checkbox" name="active" ${item?.active!==false?'checked':''}> Gudang aktif</label></p>`:''}<div class="actions"><button class="primary">Simpan ${title}</button>${item?`<button type="button" data-action="cancel-${type}">Batal ubah</button>`:''}</div></form></section>`;
+}
+function renderKitchens(){
+  const k=catalog.kitchens.find(x=>x.id===editKitchen),w=catalog.warehouses.find(x=>x.id===editWarehouse);
+  return `<section><h2>Dapur & gudang</h2><p class="muted">Setiap dapur memiliki satu gudang sendiri. Buat gudang berjenis Gudang dapur atau Gudang packing, lalu pilih saat menambah dapur. Status operasional dapur mengikuti status gudangnya.</p>${table(['Kode','Nama dapur','Jenis','Gudang','Produk jadi',''],catalog.kitchens.map(k=>`<tr class="kitchen"><td>${esc(k.code)}</td><td>${esc(k.name)}</td><td>${k.kind==='packing'?'Packing':'Produksi'}</td><td>${esc(nameOf(catalog.warehouses,k.warehouse_id))}${catalog.warehouses.find(w=>w.id===k.warehouse_id)?.active?'':' (Nonaktif)'}</td><td>${catalog.products.filter(p=>p.kitchen_id===k.id).length}</td><td>${locationActions('kitchen',k)}</td></tr>`))}</section>${isAdmin()?locationForm('kitchen',k):''}<section><h2>Master gudang</h2><p class="muted">Hapus hanya tersedia untuk data yang belum digunakan. Gudang tanpa stok dan transfer berjalan dapat dinonaktifkan setelah produk aktif dipindahkan.</p>${table(['Kode','Nama gudang','Jenis','Status',''],catalog.warehouses.map(w=>`<tr><td>${esc(w.code)}</td><td>${esc(w.name)}</td><td>${esc(warehouseKinds[w.kind]||w.kind)}</td><td>${w.active?'Aktif':'Nonaktif'}</td><td>${locationActions('warehouse',w)}</td></tr>`))}</section>${isAdmin()?locationForm('warehouse',w):''}`;
+}
 function renderProducts(){
   const p=catalog.products.find(p=>p.id===editProduct);
   let form='';
@@ -102,6 +113,17 @@ document.addEventListener('click',e=>{
   task(async()=>{
     if(action==='logout'){await api('/api/auth/logout',{});location.href='/';return;}
     if(action==='archive'){const a=await api('/api/manufacturing/archive');const url=URL.createObjectURL(new Blob([JSON.stringify(a,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='inventory-archive.json';link.click();URL.revokeObjectURL(url);return;}
+    for(const type of ['warehouse','kitchen']){
+      if(action===`edit-${type}`){if(type==='warehouse')editWarehouse=id;else editKitchen=id;render();$(`[data-form=${type}]`).scrollIntoView({behavior:'smooth'});return;}
+      if(action===`cancel-${type}`){if(type==='warehouse')editWarehouse=null;else editKitchen=null;render();return;}
+      if(action===`delete-${type}`){
+        const item=(type==='warehouse'?catalog.warehouses:catalog.kitchens).find(x=>x.id===id);
+        if(!confirm(`Hapus ${item.code} · ${item.name}? Data yang sudah digunakan tidak dapat dihapus.`))return;
+        await command(`delete-${type}`,{id,version:item.version},button);
+        if(type==='warehouse')editWarehouse=null;else editKitchen=null;
+        await refresh();render();message('Data berhasil dihapus.');return;
+      }
+    }
     if(action==='edit-product'){editProduct=id;render();$('[data-form=product]').scrollIntoView({behavior:'smooth'});return;}
     if(action==='cancel-product'){editProduct=null;render();return;}
     if(action==='edit-bom'){
@@ -143,6 +165,13 @@ document.addEventListener('submit',e=>{
   task(async()=>{
     const kind=form.dataset.form,d=new FormData(form),body=Object.fromEntries(d);
     if(kind==='activate'){await command('activate',{source_version:setup.preview.source_version},form);}
+    else if(['warehouse','kitchen'].includes(kind)){
+      const kitchen=kind==='kitchen',id=kitchen?editKitchen:editWarehouse;
+      if(id){const item=(kitchen?catalog.kitchens:catalog.warehouses).find(x=>x.id===id);body.id=id;body.version=item.version;}
+      if(kitchen)body.warehouse_id=Number(d.get('warehouse_id'));else body.active=d.has('active');
+      await command(`save-${kind}`,body,form);
+      if(kitchen)editKitchen=null;else editWarehouse=null;
+    }
     else if(kind==='product'){
       body.uoms={};for(const part of String(d.get('uoms')).split(';').map(v=>v.trim()).filter(Boolean)){const [key,value,...rest]=part.split('=');if(!key||!value||rest.length)throw Error('Konversi: sak=25; dus=10');body.uoms[key.trim()]=value.trim();}
       body.kitchen_id=d.get('kitchen_id')?Number(d.get('kitchen_id')):null;body.shelf_life_days=d.get('shelf_life_days')===''?null:Number(d.get('shelf_life_days'));body.discrete=d.has('discrete');body.active=d.has('active');

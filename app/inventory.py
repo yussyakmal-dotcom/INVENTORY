@@ -197,18 +197,103 @@ def initialize(engine, sessions):
                     changes.append({"retired_bom_id": recipe.id})
             db.add(Audit(actor_id=0, operation="schema_v2_product_categories", document=dump(changes)))
             c.schema_version = 2
-        for i in range(1, 12):
-            code = f"D{i:02}" if i <= 10 else "PACK"
-            name = f"Dapur {i}" if i <= 10 else "Dapur Packing"
-            kind = "kitchen" if i <= 10 else "packing"
-            wh = db.query(Warehouse).filter_by(code=f"G-{code}").first()
-            if not wh:
-                wh = Warehouse(code=f"G-{code}", name=f"Gudang {name}", kind=kind)
-                db.add(wh)
-                db.flush()
-            if not db.query(Kitchen).filter_by(code=code).first():
-                db.add(Kitchen(code=code, name=name, kind="production" if i <= 10 else "packing", warehouse_id=wh.id))
+        if c.schema_version < 3:
+            for i in range(1, 12):
+                code = f"D{i:02}" if i <= 10 else "PACK"
+                name = f"Dapur {i}" if i <= 10 else "Dapur Packing"
+                kind = "kitchen" if i <= 10 else "packing"
+                wh = db.query(Warehouse).filter_by(code=f"G-{code}").first()
+                if not wh:
+                    wh = Warehouse(code=f"G-{code}", name=f"Gudang {name}", kind=kind)
+                    db.add(wh)
+                    db.flush()
+                if not db.query(Kitchen).filter_by(code=code).first():
+                    db.add(Kitchen(code=code, name=name, kind="production" if i <= 10 else "packing", warehouse_id=wh.id))
+            c.schema_version = 3
         db.commit()
+
+
+
+def location_dict(item):
+    fields = ("id", "code", "name", "kind", "warehouse_id") if isinstance(item, Kitchen) else ("id", "code", "name", "kind", "active")
+    result = {key: getattr(item, key) for key in fields}
+    result["version"] = hashlib.sha256(dump(result).encode()).hexdigest()
+    return result
+
+
+def check_location_version(item, body):
+    if body.get("version") != location_dict(item)["version"]:
+        fail("Data sudah berubah. Muat ulang sebelum menyimpan atau menghapus.", 409)
+
+
+def warehouse_used(db, wid):
+    return (db.query(Balance).filter_by(warehouse_id=wid).first() is not None or
+            db.query(Transfer).filter((Transfer.source_id == wid) | (Transfer.destination_id == wid)).first() is not None)
+
+
+def save_location(db, user, body, kitchen=False):
+    admin(user)
+    model = Kitchen if kitchen else Warehouse
+    item = get(db, model, body["id"]) if body.get("id") else model()
+    if body.get("id"):
+        check_location_version(item, body)
+    code = label(body.get("code"), "Kode", 10 if kitchen else 50).upper()
+    name = label(body.get("name"), "Nama", 100 if kitchen else 200)
+    kind = body.get("kind")
+    if kind not in ({"production", "packing"} if kitchen else {"central", "store", "kitchen", "packing"}):
+        fail("Jenis dapur/gudang tidak valid.")
+    if db.query(model).filter(model.code == code, model.id != (item.id or 0)).first():
+        fail("Kode sudah digunakan.", 409)
+    if kitchen:
+        wh = get(db, Warehouse, body.get("warehouse_id"))
+        if not wh.active or wh.kind != ("packing" if kind == "packing" else "kitchen"):
+            fail("Pilih gudang aktif dengan jenis yang sesuai dapur.")
+        if db.query(Kitchen).filter(Kitchen.warehouse_id == wh.id, Kitchen.id != (item.id or 0)).first():
+            fail("Gudang sudah dimiliki dapur lain.", 409)
+        if item.id and (item.kind != kind or item.warehouse_id != wh.id):
+            if db.query(Product).filter_by(kitchen_id=item.id).first() or warehouse_used(db, item.warehouse_id) or warehouse_used(db, wh.id):
+                fail("Jenis/gudang dapur tidak dapat diganti setelah terkait produk atau riwayat transaksi.", 409)
+        item.warehouse_id = wh.id
+    else:
+        active = flag(body.get("active", True), "Status aktif")
+        if item.id:
+            linked = db.query(Kitchen).filter_by(warehouse_id=item.id).first()
+            if kind != item.kind and (linked or warehouse_used(db, item.id) or item.legacy_id is not None):
+                fail("Jenis gudang yang sudah digunakan atau terhubung dapur tidak dapat diganti.", 409)
+            if not active:
+                has_stock = db.query(Balance).filter(Balance.warehouse_id == item.id, Balance.qty > 0).first()
+                transit = db.query(Transfer).filter((Transfer.source_id == item.id) | (Transfer.destination_id == item.id), Transfer.status != "received").first()
+                assigned = linked and db.query(Product).filter_by(kitchen_id=linked.id, active=True).first()
+                if has_stock or transit or assigned:
+                    fail("Kosongkan stok, selesaikan transfer, dan pindahkan produk aktif sebelum menonaktifkan gudang.", 409)
+            if item.kind == "central" and item.active and (kind != "central" or not active):
+                if not db.query(Warehouse).filter(Warehouse.kind == "central", Warehouse.active.is_(True), Warehouse.id != item.id).first():
+                    fail("Minimal satu Gudang Central harus aktif.", 409)
+        item.active = active
+    item.code, item.name, item.kind = code, name, kind
+    db.add(item)
+    db.flush()
+    return location_dict(item)
+
+
+def delete_location(db, user, body, kitchen=False):
+    admin(user)
+    item = get(db, Kitchen if kitchen else Warehouse, body.get("id"))
+    check_location_version(item, body)
+    if kitchen:
+        used = db.query(Product).filter_by(kitchen_id=item.id).first() or warehouse_used(db, item.warehouse_id)
+    else:
+        used = (item.legacy_id is not None or warehouse_used(db, item.id) or
+                db.query(Kitchen).filter_by(warehouse_id=item.id).first() or
+                db.query(Access).filter_by(warehouse_id=item.id).first())
+        if item.kind == "central" and item.active and not db.query(Warehouse).filter(Warehouse.kind == "central", Warehouse.active.is_(True), Warehouse.id != item.id).first():
+            fail("Minimal satu Gudang Central harus aktif.", 409)
+    if used:
+        fail("Data masih terkait produk, dapur, akses pengguna, atau riwayat transaksi; tidak dapat dihapus.", 409)
+    result = {"id": item.id, "deleted": True}
+    db.delete(item)
+    db.flush()
+    return result
 
 
 def legacy_date(value):
@@ -375,6 +460,8 @@ def save_product(db, user, body, pid=None):
         if kid is None:
             fail("Produk jadi wajib memiliki dapur produksi.")
         kitchen = get(db, Kitchen, kid)
+        if not get(db, Warehouse, kitchen.warehouse_id).active:
+            fail("Gudang dapur tidak aktif.")
         if (kind == "package") != (kitchen.kind == "packing"):
             fail("Paket dibuat di packing; produk lain dibuat di dapur produksi.")
     elif kid is not None:
@@ -685,8 +772,8 @@ def install(app, sessions, engine, ready_user, get_db, state_model, user_model, 
     def catalog(u=Depends(ready_user), db=Depends(get_db)):
         return {"active": control(db).active, "user": {"id": u.id, "name": u.name, "role": u.role},
                 "warehouse_access": sorted(allowed_warehouses(db, u)) if u.role != "admin" else None,
-                "warehouses": [{"id": w.id, "code": w.code, "name": w.name, "kind": w.kind, "active": w.active} for w in db.query(Warehouse).order_by(Warehouse.id)],
-                "kitchens": [{"id": k.id, "code": k.code, "name": k.name, "kind": k.kind, "warehouse_id": k.warehouse_id} for k in db.query(Kitchen).order_by(Kitchen.id)],
+                "warehouses": [location_dict(w) for w in db.query(Warehouse).order_by(Warehouse.id)],
+                "kitchens": [location_dict(k) for k in db.query(Kitchen).order_by(Kitchen.id)],
                 "products": [product_dict(p) for p in db.query(Product).order_by(Product.code)],
                 "boms": [bom_dict(b) for b in db.query(Bom).order_by(Bom.id)]}
 
@@ -736,6 +823,10 @@ def install(app, sessions, engine, ready_user, get_db, state_model, user_model, 
         def action(who):
             if operation == "activate":
                 return migrate(db, who, payload, state_model)
+            if operation in {"save-warehouse", "save-kitchen"}:
+                return save_location(db, who, payload, kitchen=operation == "save-kitchen")
+            if operation in {"delete-warehouse", "delete-kitchen"}:
+                return delete_location(db, who, payload, kitchen=operation == "delete-kitchen")
             if operation == "save-product":
                 return save_product(db, who, payload, payload.get("id"))
             if operation == "save-bom":

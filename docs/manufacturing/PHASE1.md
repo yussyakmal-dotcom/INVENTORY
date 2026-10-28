@@ -62,3 +62,17 @@ Sebelum cutover, aplikasi lama tetap memakai datanya dan branch lama dapat dipak
 Penetapan dapur di master hanya berlaku untuk Produk jadi. WIP, bahan baku, kemasan dan produk turunan tidak mempunyai penetapan dapur. BOM hanya boleh dimiliki Produk jadi dan WIP; paket adalah subjenis Produk jadi untuk mempertahankan BOM paket tetap. Aturan ini menggantikan cakupan penetapan dapur pada spesifikasi sebelumnya.
 
 Upgrade schema v2 melepas penetapan dapur yang keliru pada produk nonjadi dan mengarsipkan BOM kategori yang tidak diperbolehkan, dengan audit tanpa menghapus stok atau histori.
+
+## CRUD Gudang dan Dapur
+
+Menu **Dapur** menyediakan daftar, tambah, ubah, dan hapus Gudang serta Dapur. Mutasi master hanya untuk Admin; pengguna lain dapat membaca daftar.
+
+- Gudang: kode unik, nama, jenis Central/Toko/Gudang dapur/Gudang packing, dan status aktif.
+- Dapur: kode unik, nama, jenis Produksi/Packing, serta satu gudang eksklusif dengan jenis yang sesuai. Buat gudangnya terlebih dahulu. Status operasional dapur mengikuti gudang.
+- Hapus hanya untuk master tanpa dependensi. Gudang yang terhubung dapur, akses pengguna, data lama, saldo atau riwayat transfer tidak dapat dihapus. Dapur yang terkait produk atau riwayat transaksi gudangnya juga tidak dapat dihapus.
+- Gudang boleh dinonaktifkan bila stok kosong, seluruh transfer selesai, dan tidak ada produk aktif di dapurnya. Minimal satu Central tetap aktif. Riwayat dipertahankan.
+- Nama/kode dapat dikoreksi. Perubahan jenis/gudang dibatasi bila sudah digunakan agar arti riwayat tidak berubah.
+- Semua perubahan memakai transaksi, audit, idempotency key, dan token versi untuk menolak perubahan dari formulir lama.
+- Schema versi 3 menjalankan seed D01–D10/PACK hanya sekali. Restart tidak membuat ulang master yang sudah dihapus atau diganti kodenya.
+
+API: `save-warehouse`, `delete-warehouse`, `save-kitchen`, `delete-kitchen` melalui endpoint command yang sama. Update/delete wajib menyertakan `id` dan `version` dari catalog.
