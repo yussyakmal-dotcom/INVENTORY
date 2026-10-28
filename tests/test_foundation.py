@@ -745,3 +745,58 @@ def test_concurrent_scrap_decisions_do_not_double_post(client):
         results = list(pool.map(lambda _: decide(client, 'approve-operation', o).status_code, range(2)))
     assert sorted(results) == [200, 409]
     assert Decimal(client.get('/api/manufacturing/stock').json()[0]['qty']) == 8
+
+
+def test_po_purchase_units_convert_price_and_receive_using_snapshot(client):
+    cat = activate(client)
+    p = make_product(client, uoms={'sak': '25'})
+    supplier = cmd(client, 'save-supplier', {'code': 'UOM-S', 'name': 'Supplier'}).json()
+    body = {'number': 'PO-UOM', 'document_date': inv.today().isoformat(), 'warehouse_id': central(cat),
+            'supplier_id': supplier['id'], 'lines': [{'product_id': p['id'], 'purchase_uom': 'sak', 'qty': '2', 'unit_price': '300000', 'conversion_factor': '999'}]}
+    o = cmd(client, 'save-po', body).json()
+    line = o['data']['lines'][0]
+    assert line['purchase_uom'] == 'sak' and Decimal(line['conversion_factor']) == 25
+    assert Decimal(line['qty']) == 50 and Decimal(line['unit_price']) == 12000
+    assert Decimal(o['data']['total']) == 600000
+    assert Decimal(line['purchase_qty']) == 2 and Decimal(line['purchase_price']) == 300000
+    # Even a master change outside the application must not reinterpret an approved PO.
+    with main.SessionLocal() as db:
+        db.get(m.Product, p['id']).uoms = json.dumps({'sak': '30'})
+        db.commit()
+    o = decide(client, 'submit-po', o).json()
+    o = decide(client, 'approve-operation', o).json()
+    receipt_body = po_receipt_body(o, p, qty='1')
+    receipt_body['lines'][0]['uom'] = 'sak'
+    received = cmd(client, 'receive-po', receipt_body)
+    assert received.status_code == 200, received.text
+    o = received.json()
+    assert o['status'] == 'partial'
+    assert Decimal(o['data']['lines'][0]['received_qty']) == 25
+    row = client.get('/api/manufacturing/stock').json()[0]
+    assert Decimal(row['qty']) == 25 and Decimal(row['unit_cost']) == 12000
+    receipt_body = po_receipt_body(o, p, qty='2', reference='UOM-OVER')
+    receipt_body['lines'][0]['uom'] = 'sak'
+    assert cmd(client, 'receive-po', receipt_body).status_code == 409
+    receipt_body['lines'][0]['uom'] = 'dus'
+    assert cmd(client, 'receive-po', receipt_body).status_code == 422
+    receipt_body = po_receipt_body(o, p, qty='25', reference='UOM-BASE')
+    receipt_body['lines'][0]['uom'] = 'kg'
+    o = cmd(client, 'receive-po', receipt_body).json()
+    assert o['status'] == 'received'
+    assert [r['lines'][0]['receipt_uom'] for r in o['data']['receipts']] == ['sak', 'kg']
+    assert sum(Decimal(r['qty']) for r in client.get('/api/manufacturing/stock').json()) == 50
+
+
+def test_po_units_validation_discrete_and_base_price_rounding(client):
+    cat = activate(client)
+    p = make_product(client, base_uom='pcs', discrete=True, uoms={'dus': '3'})
+    supplier = cmd(client, 'save-supplier', {'code': 'ROUND-S', 'name': 'Supplier'}).json()
+    body = {'number': 'PO-ROUND', 'document_date': inv.today().isoformat(), 'warehouse_id': central(cat),
+            'supplier_id': supplier['id'], 'lines': [{'product_id': p['id'], 'purchase_uom': 'dus', 'qty': '1', 'unit_price': '100'}]}
+    for unit, qty in [('unknown', '1'), ('dus', '0.5')]:
+        assert cmd(client, 'save-po', {**body, 'lines': [{**body['lines'][0], 'purchase_uom': unit, 'qty': qty}]}).status_code == 422
+    result = cmd(client, 'save-po', body)
+    assert result.status_code == 200, result.text
+    line = result.json()['data']['lines'][0]
+    assert line['unit_price'] == '33.33333333'
+    assert Decimal(result.json()['data']['total']) == 100

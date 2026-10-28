@@ -1,7 +1,7 @@
 """PO, physical counts and stock scrap. All writes run inside inventory.execute's DB gate."""
 import json
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 import inventory as c
 from inventory_models import Supplier, Operation, Product, Warehouse, Balance, Lot, now
@@ -130,10 +130,19 @@ def save_po(db, user, body):
         if not p.active or p.id in seen:
             c.fail('Produk PO harus aktif dan tidak berulang.')
         seen.add(p.id)
-        qty = c.quantity_for(p, row.get('qty'))
-        price = c.number(row.get('unit_price'), 'Harga satuan dasar', scale=8)
-        total += qty * price
-        lines.append({**snapshot_product(p), 'qty': str(qty), 'unit_price': str(price), 'received_qty': '0'})
+        purchase_uom = row.get('purchase_uom', p.base_uom)
+        units = {p.base_uom: '1', **json.loads(p.uoms)}
+        if not isinstance(purchase_uom, str) or purchase_uom not in units:
+            c.fail('Satuan beli harus terdaftar pada master produk.')
+        factor = Decimal(units[purchase_uom])
+        purchase_qty = c.number(row.get('qty'), 'Qty beli', positive=True)
+        purchase_price = c.number(row.get('unit_price'), 'Harga per satuan beli', scale=8)
+        qty = c.quantity_for(p, purchase_qty * factor)
+        price = c.number((purchase_price / factor).quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP), 'Harga satuan dasar', scale=8)
+        total += purchase_qty * purchase_price
+        lines.append({**snapshot_product(p), 'qty': str(qty), 'unit_price': str(price), 'received_qty': '0',
+                      'purchase_uom': purchase_uom, 'conversion_factor': str(factor),
+                      'purchase_qty': str(purchase_qty), 'purchase_price': str(purchase_price)})
     data = {'supplier_name': supplier.name, 'supplier_code': supplier.code, 'lines': lines, 'total': str(total), 'receipts': []}
     if o:
         o.number = c.label(body.get('number'), 'Nomor PO', 100).upper()
@@ -173,7 +182,16 @@ def receive_po(db, user, body):
             c.fail('Produk tidak tercantum pada PO.')
         line = by_product[pid]
         p = c.get(db, Product, pid)
-        qty = c.number(row.get('qty'), 'Qty penerimaan')
+        receipt_uom = row.get('uom', line['uom'])
+        purchase_uom = line.get('purchase_uom', line['uom'])
+        if receipt_uom == line['uom']:
+            factor = Decimal(1)
+        elif receipt_uom == purchase_uom:
+            factor = Decimal(line['conversion_factor'])
+        else:
+            c.fail('Satuan terima harus satuan PO atau satuan dasar yang tersimpan.')
+        receipt_qty = c.number(row.get('qty'), 'Qty penerimaan')
+        qty = receipt_qty * factor
         if qty == 0:
             continue
         c.quantity_for(p, qty)
@@ -183,7 +201,7 @@ def receive_po(db, user, body):
                                           'unit_cost': line['unit_price'], 'batch_number': row.get('batch_number'),
                                           'expiry_date': row.get('expiry_date'), 'reference': o.number + '/' + reference[:40]})
         line['received_qty'] = str(Decimal(line['received_qty']) + qty)
-        received.append({**snapshot_product(p), 'qty': str(qty), 'lot_id': result['lot_id'],
+        received.append({**snapshot_product(p), 'qty': str(qty), 'receipt_qty': str(receipt_qty), 'receipt_uom': receipt_uom, 'conversion_factor': str(factor), 'lot_id': result['lot_id'],
                          'batch_number': row['batch_number'], 'expiry_date': row['expiry_date'], 'unit_cost': line['unit_price']})
     if not received:
         c.fail('Minimal satu baris penerimaan harus positif.')

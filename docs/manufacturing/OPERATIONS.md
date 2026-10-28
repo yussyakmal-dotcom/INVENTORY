@@ -18,10 +18,10 @@ Atur penugasan gudang di **Pengguna & akses**, termasuk untuk Purchasing dan App
 ## Purchasing / PO
 
 1. Tambahkan supplier (kode, nama, kontak/alamat, aktif). Supplier lama dapat dinonaktifkan; histori tidak dihapus.
-2. Buat PO: nomor unik, tanggal, supplier, Gudang Central, daftar barang, qty dan harga per **satuan dasar**. Nilai PO adalah jumlah qty × harga. Pajak, diskon, ongkir, invoice dan pembayaran belum termasuk.
+2. Buat PO: nomor unik, tanggal, supplier, Gudang Central, daftar barang, qty beli, satuan beli dari master produk, dan harga per **satuan beli**. Satuan dasar selalu tersedia; satuan alternatif tampil bersama faktor konversinya. Nilai PO adalah jumlah qty beli × harga beli. Pajak, diskon, ongkir, invoice dan pembayaran belum termasuk.
 3. Simpan draft. Draft dapat diubah, diajukan, atau dibatalkan. Draft belum menambah stok.
 4. Admin/Approver memberi keputusan dengan catatan. PO disetujui tidak dapat diedit; supplier dan produk harus aktif saat pengajuan/persetujuan.
-5. Pada PO disetujui, Gudang menerima barang. Catat nomor dokumen supplier, tanggal fisik, petugas penerima, qty, batch, dan ED. Qty nol dilewati; batch/ED wajib untuk baris positif. Barang kedaluwarsa ditolak. Harga dari PO menjadi HPP lot.
+5. Pada PO disetujui, Gudang menerima barang. Catat nomor dokumen supplier, tanggal fisik, petugas penerima, qty, batch, dan ED. Qty nol dilewati; batch/ED wajib untuk baris positif. Barang kedaluwarsa ditolak. Penerimaan bisa memakai satuan beli PO atau satuan dasar. Faktor konversi dari snapshot PO mengubah qty ke satuan dasar. HPP lot = harga satuan beli / faktor konversi, dibulatkan 8 desimal; nilai komersial PO tetap qty beli × harga beli. Selisih pembulatan biaya sangat kecil dapat terjadi bila pembagian tidak habis.
 6. Penerimaan sebagian menghasilkan status **Diterima sebagian**, menyimpan tiap kejadian, dan menyisakan qty yang belum dipenuhi. Qty melebihi pesanan dan nomor penerimaan berulang pada PO yang sama ditolak. Satu produk dapat diterima dalam beberapa batch melalui beberapa penerimaan atau beberapa baris API.
 7. Seluruh barang diterima → **Diterima seluruhnya**. Untuk sisa pesanan yang tidak dilanjutkan, pilih **Tutup sisa PO** dan isi alasan. Penutupan tidak mengubah stok atau menghapus sisa historis.
 
@@ -54,3 +54,9 @@ Semua perintah melalui gate transaksi database. Setiap dokumen memiliki revision
 Model schema 6: `inv_suppliers`, `inv_operations`. Header memakai foreign key ke gudang/supplier; detail tervalidasi dan snapshot nama/satuan/harga disimpan dalam dokumen JSON, sesuai pola BOM fondasi. Transaksi/supplier dari arsip lama belum diimpor ulang.
 
 Pengujian mencakup PO draft/persetujuan/penolakan, penerimaan parsial/penuh/berlebih, rollback penerimaan tidak valid, idempotency, penutupan sisa PO, kunci opname, lot temuan kedaluwarsa, penahanan scrap, pembatalan/penolakan, persetujuan bersamaan, scope gudang, dan proteksi master. Browser menguji supplier → PO → terima sebagian/penuh → scrap → opname dengan lot temuan.
+
+## Satuan pada PO
+
+Contoh: satuan dasar kg, konversi sak=25. Pesan 2 sak seharga Rp300.000/sak: total PO Rp600.000, setara 50 kg, HPP Rp12.000/kg. Penerimaan pertama 1 sak menambah 25 kg; berikutnya bisa 1 sak atau 25 kg. Sisa/kelebihan diperiksa dalam satuan dasar.
+
+UI menampilkan Qty beli, Satuan beli, Harga/satuan beli, dan Setara stok dasar. Perubahan produk/satuan mengosongkan harga agar harga satuan sebelumnya tidak terbawa tanpa diperiksa. PO menyimpan `purchase_uom`, `conversion_factor`, `purchase_qty`, `purchase_price`; `qty`/`unit_price`/`received_qty` tetap dalam satuan dasar untuk kompatibilitas. PO lama tanpa field ini dibaca dengan faktor 1 dan satuan dasar, tanpa perubahan saldo. API save-po menerima qty/harga dalam purchase_uom; receive-po menerima uom pilihan PO atau dasar (jika uom tidak dikirim, default dasar).
