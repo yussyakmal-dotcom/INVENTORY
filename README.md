@@ -106,4 +106,7 @@ Ikon disematkan langsung di aplikasi (SVG), jadi tetap tampil tanpa akses intern
 
 ## Rancangan modul manufaktur
 
-Spesifikasi yang disusun dari keputusan 28 Oktober 2026 tersedia di [docs/manufacturing](docs/manufacturing/README.md): PRD, struktur database DBML, alur layar, rencana implementasi, dan skenario penerimaan. Ini adalah rancangan untuk pengembangan; fitur manufaktur belum dipasang pada aplikasi.
+Spesifikasi yang disusun dari keputusan 28 Oktober 2026 tersedia di [docs/manufacturing](docs/manufacturing/README.md): PRD, struktur database DBML, alur layar, rencana implementasi, dan skenario penerimaan.
+
+Implementasi tahap pertama tersedia di `/manufacturing`: master dapur/produk, BOM versi, dan stok server dengan FEFO. Mode ini diaktifkan melalui migrasi terkontrol; tidak otomatis menggantikan stok lama. Baca [panduan tahap 1](docs/manufacturing/PHASE1.md) untuk penggunaan di salinan pengujian, batas fitur, dan rollback. Planning/MO/WO dan pencatatan hasil produksi belum tersedia.
+
