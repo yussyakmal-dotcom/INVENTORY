@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from inventory_models import (Access, Audit, Balance, Base, Bom, Command, Control,
                               Kitchen, Lot, Movement, Product, Transfer,
                               TransferLine, TransferDocument, TransferReceipt, TransferReceiptLine,
-                              TransferDispatch, TransferReceiver, Operation, Warehouse, now)
+                              TransferDispatch, TransferReceiver, Operation, TransferUnits, ReceiptUnits, TransferReceivedUnits, Warehouse, now)
 
 KINDS = {"raw", "packaging", "wip", "finished", "package", "byproduct"}
 MADE = {"wip", "finished", "package", "byproduct"}
@@ -227,6 +227,8 @@ def initialize(engine, sessions):
             c.schema_version = 5
         if c.schema_version < 6:
             c.schema_version = 6
+        if c.schema_version < 7:
+            c.schema_version = 7
         db.commit()
 
 
@@ -507,6 +509,14 @@ def save_product(db, user, body, pid=None):
     return product_dict(p)
 
 
+def selected_unit(p, unit=None, units=None):
+    units = units if units is not None else {p.base_uom: '1', **json.loads(p.uoms)}
+    unit = p.base_uom if unit is None else unit
+    if not isinstance(unit, str) or unit not in units:
+        fail('Satuan tidak tersedia untuk produk/dokumen ini.')
+    return unit, Decimal(units[unit])
+
+
 def quantity_for(p, qty):
     q = number(qty, "Qty", True)
     if p.discrete and q != q.to_integral_value():
@@ -677,16 +687,21 @@ def receive_stock(db, user, body):
         fail("Tanggal kedaluwarsa wajib dalam format YYYY-MM-DD.")
     if exp < today():
         fail("Tidak dapat menerima barang kedaluwarsa.")
-    qty = quantity_for(p, body.get("qty"))
+    unit, factor = selected_unit(p, body.get('uom'))
+    entered_qty = number(body.get('qty'), 'Qty penerimaan', True)
+    entered_cost = number(body.get('unit_cost'), 'Harga per satuan terima', scale=8)
+    qty = quantity_for(p, entered_qty * factor)
+    base_cost = number((entered_cost / factor).quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP), 'HPP dasar', scale=8)
     lot = Lot(product_id=p.id, batch_number=label(body.get("batch_number"), "Batch"),
-              expiry_date=exp, unit_cost=number(body.get("unit_cost"), "HPP satuan dasar", scale=8))
+              expiry_date=exp, unit_cost=base_cost)
     db.add(lot)
     db.flush()
+    db.add(ReceiptUnits(lot_id=lot.id, document=dump({'uom': unit, 'factor': str(factor), 'qty': str(entered_qty), 'unit_cost': str(entered_cost), 'base_qty': str(qty), 'base_unit_cost': str(base_cost)})))
     bal = Balance(lot_id=lot.id, warehouse_id=wh.id, qty=qty)
     db.add(bal)
     db.flush()
     movement(db, bal, lot, qty, "RECEIPT", label(body.get("reference"), "Referensi", 150), user)
-    return {"lot_id": lot.id, "qty": str(qty)}
+    return {"lot_id": lot.id, "qty": str(qty), "uom": p.base_uom, "input_uom": unit, "input_qty": str(entered_qty), "unit_cost": str(base_cost)}
 
 
 def consume(db, user, body):
@@ -729,10 +744,10 @@ def ship(db, user, body):
         fail("Nomor dokumen kirim sudah digunakan.", 409)
     entries = body.get("lines")
     if entries is None:  # Keep single-product API callers compatible.
-        entries = [{"product_id": body.get("product_id"), "qty": body.get("qty")}]
+        entries = [{"product_id": body.get("product_id"), "qty": body.get("qty"), "uom": body.get("uom")}]
     if not isinstance(entries, list) or not entries or len(entries) > 200:
         fail("Isi 1–200 baris barang kiriman.")
-    picks, seen = [], set()
+    picks, seen, unit_snapshots = [], set(), {}
     for entry in entries:
         if not isinstance(entry, dict):
             fail("Baris kiriman tidak valid.")
@@ -740,12 +755,18 @@ def ship(db, user, body):
         if not p.active or p.id in seen:
             fail("Produk harus aktif dan tidak boleh berulang dalam dokumen.")
         seen.add(p.id)
-        picks.extend(fefo(db, p, src, entry.get("qty")))
+        unit, factor = selected_unit(p, entry.get('uom'))
+        entered_qty = number(entry.get('qty'), 'Qty kirim', True)
+        base_qty = quantity_for(p, entered_qty * factor)
+        unit_snapshots[str(p.id)] = {'uom': unit, 'factor': str(factor), 'qty': str(entered_qty), 'base_qty': str(base_qty),
+                                      'base_uom': p.base_uom, 'units': {p.base_uom: '1', **json.loads(p.uoms)}}
+        picks.extend(fefo(db, p, src, base_qty))
     transfer = Transfer(source_id=src.id, destination_id=dst.id, reference=label(body.get("reference") or doc_no, "Referensi", 150), created_by=user.id)
     db.add(transfer)
     db.flush()
     db.add(TransferDocument(transfer_id=transfer.id, document_number=doc_no, shipped_date=shipped_date))
     db.add(TransferDispatch(transfer_id=transfer.id, sender_name=sender_name, vehicle_number=vehicle_number))
+    db.add(TransferUnits(transfer_id=transfer.id, document=dump(unit_snapshots)))
     for balance, lot, qty in picks:
         balance.qty -= qty
         db.add(TransferLine(transfer_id=transfer.id, lot_id=lot.id, shipped_qty=qty, received_qty=0))
@@ -756,6 +777,9 @@ def ship(db, user, body):
 
 def transfer_dict(db, t):
     doc = db.get(TransferDocument, t.id)
+    unit_record = db.get(TransferUnits, t.id)
+    unit_snapshots = json.loads(unit_record.document) if unit_record else {}
+    receipt_units = {r.receipt_id: json.loads(r.document) for r in db.query(TransferReceivedUnits).join(TransferReceipt, TransferReceipt.id == TransferReceivedUnits.receipt_id).filter(TransferReceipt.transfer_id == t.id)}
     dispatch = db.get(TransferDispatch, t.id)
     receiver_names = {r.receipt_id: r.receiver_name for r in db.query(TransferReceiver).join(TransferReceipt, TransferReceipt.id == TransferReceiver.receipt_id).filter(TransferReceipt.transfer_id == t.id)}
     lines = []
@@ -764,19 +788,21 @@ def transfer_dict(db, t):
         product = get(db, Product, lot.product_id)
         lines.append({"id": line.id, "lot_id": lot.id, "product_id": product.id,
                       "product_code": product.code, "product_name": product.name, "uom": product.base_uom,
+                      "units": unit_snapshots.get(str(product.id), {}).get('units', {product.base_uom: '1'}),
+                      "shipping_uom": unit_snapshots.get(str(product.id), {}).get('uom', product.base_uom),
                       "batch_number": lot.batch_number, "expiry_date": str(lot.expiry_date) if lot.expiry_date else None,
                       "shipped_qty": str(line.shipped_qty), "received_qty": str(line.received_qty),
                       "remaining": str(line.shipped_qty - line.received_qty)})
     receipts = [{"id": r.id, "received_date": str(r.received_date), "actor_id": r.actor_id,
                  "recorded_at": str(r.created_at), "receiver_name": receiver_names.get(r.id),
-                 "lines": [{"id": l.transfer_line_id, "qty": str(l.qty)} for l in db.query(TransferReceiptLine).filter_by(receipt_id=r.id)]}
+                 "lines": [{"id": l.transfer_line_id, "qty": str(l.qty), **receipt_units.get(r.id, {}).get(str(l.transfer_line_id), {})} for l in db.query(TransferReceiptLine).filter_by(receipt_id=r.id)]}
                 for r in db.query(TransferReceipt).filter_by(transfer_id=t.id).order_by(TransferReceipt.id)]
     return {"id": t.id, "source_id": t.source_id, "destination_id": t.destination_id,
             "reference": t.reference, "status": t.status, "document_number": doc.document_number,
             "shipped_date": str(doc.shipped_date), "legacy": doc.legacy,
             "sender_name": dispatch.sender_name if dispatch else None,
             "vehicle_number": dispatch.vehicle_number if dispatch else None,
-            "receipts": receipts, "lines": lines}
+            "shipment_units": unit_snapshots, "receipts": receipts, "lines": lines}
 
 
 def receive_transfer(db, user, tid, body):
@@ -797,6 +823,9 @@ def receive_transfer(db, user, tid, body):
     entries = body.get("lines")
     if not isinstance(entries, list) or not entries:
         fail("Isi minimal satu jumlah diterima.")
+    unit_record = db.get(TransferUnits, t.id)
+    unit_snapshots = json.loads(unit_record.document) if unit_record else {}
+    received_units = {}
     seen, total = set(), Decimal(0)
     for entry in entries:
         if not isinstance(entry, dict):
@@ -809,6 +838,9 @@ def receive_transfer(db, user, tid, body):
         qty = number(entry.get("qty"), "Qty diterima")
         lot = get(db, Lot, line.lot_id)
         p = get(db, Product, lot.product_id)
+        unit, factor = selected_unit(p, entry.get('uom'), unit_snapshots.get(str(p.id), {}).get('units', {p.base_uom: '1'}))
+        received_units[str(lid)] = {'input_qty': str(qty), 'input_uom': unit, 'factor': str(factor)}
+        qty = number(qty * factor, 'Qty dasar diterima')
         if p.discrete and qty != qty.to_integral_value():
             fail("Qty produk diskret harus bulat.")
         if qty > line.shipped_qty - line.received_qty:
@@ -828,6 +860,7 @@ def receive_transfer(db, user, tid, body):
         movement(db, bal, lot, qty, "TRANSFER_IN", doc.document_number, user)
     if total == 0:
         fail("Jumlah diterima harus lebih dari nol.")
+    db.add(TransferReceivedUnits(receipt_id=receipt.id, document=dump(received_units)))
     t.status = "received" if all(l.shipped_qty == l.received_qty for l in lines.values()) else "partial"
     db.flush()
     return transfer_dict(db, t)

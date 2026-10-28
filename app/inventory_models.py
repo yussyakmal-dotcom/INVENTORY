@@ -226,3 +226,21 @@ class Operation(Base):
     approved_by = Column(Integer)
     created_at = Column(DateTime, nullable=False, default=now)
     decided_at = Column(DateTime)
+
+
+class TransferUnits(Base):
+    __tablename__ = 'inv_transfer_units'
+    transfer_id = Column(Integer, ForeignKey('inv_transfers.id'), primary_key=True)
+    document = Column(BigText, nullable=False)
+
+
+class ReceiptUnits(Base):
+    __tablename__ = 'inv_receipt_units'
+    lot_id = Column(Integer, ForeignKey('inv_lots.id'), primary_key=True)
+    document = Column(BigText, nullable=False)
+
+
+class TransferReceivedUnits(Base):
+    __tablename__ = 'inv_transfer_received_units'
+    receipt_id = Column(Integer, ForeignKey('inv_transfer_receipts.id'), primary_key=True)
+    document = Column(BigText, nullable=False)

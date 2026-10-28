@@ -60,3 +60,17 @@ Pengujian mencakup PO draft/persetujuan/penolakan, penerimaan parsial/penuh/berl
 Contoh: satuan dasar kg, konversi sak=25. Pesan 2 sak seharga Rp300.000/sak: total PO Rp600.000, setara 50 kg, HPP Rp12.000/kg. Penerimaan pertama 1 sak menambah 25 kg; berikutnya bisa 1 sak atau 25 kg. Sisa/kelebihan diperiksa dalam satuan dasar.
 
 UI menampilkan Qty beli, Satuan beli, Harga/satuan beli, dan Setara stok dasar. Perubahan produk/satuan mengosongkan harga agar harga satuan sebelumnya tidak terbawa tanpa diperiksa. PO menyimpan `purchase_uom`, `conversion_factor`, `purchase_qty`, `purchase_price`; `qty`/`unit_price`/`received_qty` tetap dalam satuan dasar untuk kompatibilitas. PO lama tanpa field ini dibaca dengan faktor 1 dan satuan dasar, tanpa perubahan saldo. API save-po menerima qty/harga dalam purchase_uom; receive-po menerima uom pilihan PO atau dasar (jika uom tidak dikirim, default dasar).
+
+## Cetak PO yang disetujui
+
+Tombol **Cetak** ada di sebelah **Buka** pada daftar PO, hanya setelah persetujuan (status Disetujui, Diterima sebagian, Diterima seluruhnya, atau Ditutup). Draft, menunggu persetujuan, ditolak, dan dibatalkan tidak dapat dicetak sebagai PO resmi. Format A4 memuat nomor/tanggal, supplier, gudang tujuan, status, akun persetujuan, qty/satuan beli, harga, konversi stok, total, dan tempat tanda tangan. Mencetak tidak memposting ulang transaksi. Dialog browser bisa digunakan untuk printer atau Simpan sebagai PDF.
+
+## Satuan transfer dan penerimaan langsung
+
+- **Penerimaan pembelian tanpa PO:** pilih produk, qty dan satuan terima; harga diisi per satuan terima. Sistem menampilkan setara qty stok dan HPP satuan dasar. Pilihan satuan berasal dari master. Mengganti produk/satuan mengosongkan harga untuk diperiksa kembali.
+- **Transfer keluar:** setiap baris memiliki qty, satuan kirim, dan preview setara stok dasar. Server menghitung FEFO dalam satuan dasar. DO mencantumkan ringkasan satuan kirim beserta konversi serta rincian lot dalam satuan dasar.
+- **Penerimaan transfer:** qty awal sama dengan sisa kiriman dalam satuan dasar per lot, sehingga tidak terjadi pembulatan pecahan kemasan. Bisa memilih satuan alternatif yang disimpan pada saat pengiriman, lalu mengisi qty fisik dalam satuan itu. Perubahan satuan mengosongkan qty agar angka lama tidak ditafsirkan ulang. Sisa dan batas penerimaan selalu diperiksa server dalam satuan dasar. Riwayat menyimpan qty/satuan input dan qty dasar.
+- Transfer lama yang belum menyimpan faktor hanya memakai satuan dasar; konversi tidak ditebak dari master terbaru. Penerimaan PO tetap memakai snapshot PO.
+- Schema 7 menambah tabel snapshot satuan pengiriman dan penerimaan secara aditif. Tidak mengubah saldo atau biaya transaksi lama. Konversi qty dibatasi presisi stok 6 desimal; HPP satuan dasar dibulatkan 8 desimal.
+
+API receipt: `qty`, `uom`, `unit_cost` mengikuti satuan terima. API ship: `lines[].qty` dan `lines[].uom` mengikuti satuan kirim. API receive-transfer: `lines[].qty` dan `lines[].uom` mengikuti satuan terima yang tersimpan dalam snapshot. Jika `uom` tidak dikirim, API lama tetap memakai satuan dasar. Faktor dari client tidak dipercaya; server mengambil faktor master atau snapshot sesuai tahap transaksi.

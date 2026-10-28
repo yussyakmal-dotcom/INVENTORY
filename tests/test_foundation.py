@@ -800,3 +800,60 @@ def test_po_units_validation_discrete_and_base_price_rounding(client):
     line = result.json()['data']['lines'][0]
     assert line['unit_price'] == '33.33333333'
     assert Decimal(result.json()['data']['total']) == 100
+
+
+def test_purchase_receipt_units_and_transfer_snapshot_conversion(client):
+    cat = activate(client)
+    p = make_product(client, uoms={'sak': '25'})
+    wh, dest = central(cat), cat['kitchens'][0]['warehouse_id']
+    body = {'warehouse_id': wh, 'product_id': p['id'], 'qty': '2', 'uom': 'sak', 'unit_cost': '300000',
+            'batch_number': 'UNIT-LOT', 'expiry_date': (inv.today()+timedelta(days=60)).isoformat(), 'reference': 'UNIT-IN'}
+    token = key()
+    r = cmd(client, 'receipt', body, token)
+    assert r.status_code == 200, r.text
+    assert cmd(client, 'receipt', body, token).json() == r.json()
+    assert Decimal(r.json()['qty']) == 50 and Decimal(r.json()['unit_cost']) == 12000
+    with main.SessionLocal() as db:
+        snap = json.loads(db.get(m.ReceiptUnits, r.json()['lot_id']).document)
+        assert snap['uom'] == 'sak' and Decimal(snap['factor']) == 25
+    assert cmd(client, 'receipt', {**body, 'uom': 'unknown'}).status_code == 422
+    ship_body = {'source_id': wh, 'destination_id': dest, 'document_number': 'UNIT-DO',
+                 'lines': [{'product_id': p['id'], 'qty': '1', 'uom': 'sak'}]}
+    shipped = cmd(client, 'ship', ship_body)
+    assert shipped.status_code == 200, shipped.text
+    t = shipped.json()
+    assert Decimal(t['lines'][0]['shipped_qty']) == 25 and t['lines'][0]['shipping_uom'] == 'sak'
+    assert Decimal(t['shipment_units'][str(p['id'])]['factor']) == 25
+    with main.SessionLocal() as db:
+        db.get(m.Product, p['id']).uoms = json.dumps({'sak': '30'})
+        db.commit()
+    receive = {'id': t['id'], 'lines': [{'id': t['lines'][0]['id'], 'qty': '0.4', 'uom': 'sak'}]}
+    r = cmd(client, 'receive-transfer', receive)
+    assert r.status_code == 200, r.text
+    t = r.json()
+    assert Decimal(t['lines'][0]['received_qty']) == 10
+    assert t['receipts'][0]['lines'][0]['input_uom'] == 'sak'
+    assert cmd(client, 'receive-transfer', {'id': t['id'], 'lines': [{'id': t['lines'][0]['id'], 'qty': '1', 'uom': 'sak'}]}).status_code == 422
+    final = cmd(client, 'receive-transfer', {'id': t['id'], 'lines': [{'id': t['lines'][0]['id'], 'qty': '15', 'uom': 'kg'}]}).json()
+    assert final['status'] == 'received'
+    assert sum(Decimal(s['qty']) for s in client.get('/api/manufacturing/stock').json()) == 50
+    assert all(Decimal(s['unit_cost']) == 12000 for s in client.get('/api/manufacturing/stock').json())
+
+
+def test_transfer_units_validation_and_legacy_fallback(client):
+    cat = activate(client)
+    p = make_product(client, base_uom='pcs', discrete=True, uoms={'dus': '3'})
+    receipt(client, central(cat), p['id'], qty='9')
+    body = {'source_id': central(cat), 'destination_id': cat['kitchens'][0]['warehouse_id'],
+            'product_id': p['id'], 'qty': '0.5', 'uom': 'dus'}
+    assert cmd(client, 'ship', body).status_code == 422
+    assert cmd(client, 'ship', {**body, 'uom': 'bad'}).status_code == 422
+    t = cmd(client, 'ship', {**body, 'qty': '1'}).json()
+    assert Decimal(t['lines'][0]['shipped_qty']) == 3
+    with main.SessionLocal() as db:
+        db.query(m.TransferUnits).delete()
+        db.commit()
+    old = client.get('/api/manufacturing/transfers').json()[0]
+    assert old['lines'][0]['units'] == {'pcs': '1'}
+    assert cmd(client, 'receive-transfer', {'id': old['id'], 'lines': [{'id': old['lines'][0]['id'], 'qty': '1', 'uom': 'dus'}]}).status_code == 422
+    assert cmd(client, 'receive-transfer', {'id': old['id'], 'lines': [{'id': old['lines'][0]['id'], 'qty': '3'}]}).json()['status'] == 'received'
