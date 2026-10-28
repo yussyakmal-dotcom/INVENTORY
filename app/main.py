@@ -23,6 +23,8 @@ from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
+import inventory
+
 # ------------------------------------------------------------------ konfigurasi
 def env(name, default=None):
     v = os.getenv(name)
@@ -198,6 +200,7 @@ app = FastAPI(title="Inventory Management API", version="1.0-MVP", docs_url="/ap
 @app.on_event("startup")
 def _startup():
     init_db()
+    inventory.initialize(engine, SessionLocal)
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
@@ -331,7 +334,8 @@ async def update_user(uid: int, request: Request, admin: User = Depends(admin_us
 def get_state(u: User = Depends(ready_user), db: Session = Depends(get_db)):
     row = db.get(AppState, 1)
     users = [user_dict(x) for x in db.query(User).order_by(User.id).all()]
-    return {"version": row.version if row else 0, "data": json.loads(row.data) if row else None, "users": users}
+    return {"version": row.version if row else 0, "data": json.loads(row.data) if row else None,
+            "users": users, "foundationActive": inventory.control(db).active}
 
 @app.get("/api/state/version")
 def get_version(u: User = Depends(ready_user), db: Session = Depends(get_db)):
@@ -341,6 +345,7 @@ def get_version(u: User = Depends(ready_user), db: Session = Depends(get_db)):
 @app.put("/api/state")
 async def put_state(request: Request, u: User = Depends(ready_user), db: Session = Depends(get_db)):
     body = await request.json()
+    identity = inventory.legacy_write_guard(db, u)
     base = int(body.get("version", -1))
     data = body.get("data")
     if not isinstance(data, dict):
@@ -350,14 +355,14 @@ async def put_state(request: Request, u: User = Depends(ready_user), db: Session
     now = utcnow()
     if base == 0:
         try:
-            db.add(AppState(id=1, version=1, data=payload, updated_at=now, updated_by=u.username)); db.commit()
+            db.add(AppState(id=1, version=1, data=payload, updated_at=now, updated_by=identity.username)); db.commit()
             new_version = 1
         except IntegrityError:
             db.rollback()
             return JSONResponse({"detail": "Data sudah diubah pengguna lain."}, status_code=409)
     else:
         res = db.execute(text("UPDATE app_state SET data=:d, version=version+1, updated_at=:t, updated_by=:u WHERE id=1 AND version=:v"),
-                         {"d": payload, "t": now, "u": u.username, "v": base})
+                         {"d": payload, "t": now, "u": identity.username, "v": base})
         if res.rowcount != 1:
             db.rollback()
             return JSONResponse({"detail": "Data sudah diubah pengguna lain."}, status_code=409)
@@ -368,7 +373,7 @@ async def put_state(request: Request, u: User = Depends(ready_user), db: Session
         if not isinstance(e, dict):
             continue
         if e.get("role") != "system":   # identitas diambil dari sesi, bukan dari browser
-            e["user_id"] = u.username; e["role"] = u.role
+            e["user_id"] = identity.username; e["role"] = identity.role
         e["state_version"] = new_version
         entries.append(e)
     write_audit(entries)
@@ -383,3 +388,7 @@ def health(db: Session = Depends(get_db)):
 @app.get("/")
 def index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"), headers={"Cache-Control": "no-cache"})
+
+
+inventory.install(app, SessionLocal, engine, ready_user, get_db, AppState, User, STATIC_DIR)
+

@@ -1901,6 +1901,7 @@ function emptyState() {
 }
 async function pullState() {
   const r = await api('GET', '/api/state'); const ui = S?.ui;
+  if (r.foundationActive) { window.location.replace('/manufacturing'); throw new UserError('Fondasi server sudah aktif. Membuka halaman manufaktur.'); }
   let migrated = false;
   if (r.data) { S = r.data; VER = r.version; migrated = migrate(); }
   else { (CFG.demoData ? seed : emptyState)(); VER = 0; }
@@ -1944,6 +1945,8 @@ function showChangePw(forced) {
 }
 async function afterLogin() {
   if (ME.mustChangePassword) { showChangePw(true); return; }
+  const foundation = await api('GET', '/api/manufacturing/setup');
+  if (foundation.active) { window.location.replace('/manufacturing'); return; }
   await pullState(); resetForms(); document.getElementById('login').hidden = true; render(); setSync('ok');
 }
 A.logout = async () => { if (dirty || saving) await flush(); try { await api('POST', '/api/auth/logout'); } catch (e) { } S = null; showLogin('Anda sudah keluar.'); };
@@ -1954,6 +1957,8 @@ A.go = d => { if (d.page) S.ui.page = d.page; F.notifOpen = false; document.body
 const _renderSide = renderSide;
 renderSide = function () {
   _renderSide(); const u = cur(); const who = document.querySelector('#side .who');
+  const nav = document.querySelector('#side nav');
+  if (nav) nav.insertAdjacentHTML('beforeend', '<div class="ng"><a href="/manufacturing">Fondasi manufaktur</a></div>');
   if (who) who.innerHTML = `<div class="me"><strong>${esc(u.name)}</strong><span>${esc(ROLES[u.role]?.label || u.role)}${u.warehouseId ? ', ' + esc(W(u.warehouseId)?.name || 'gudang #' + u.warehouseId) : ''}</span></div>
   <small id="syncState" data-s="ok">Tersimpan di server</small><div class="meacts"><button type="button" class="lnk" data-act="changePw">${ic('key')}Ganti password</button><button type="button" class="lnk" data-act="logout">${ic('logout')}Keluar</button></div>`;
 };
@@ -2001,3 +2006,4 @@ init();
 </script>
 </body>
 </html>
+
