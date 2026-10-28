@@ -559,7 +559,9 @@ def products_excel(db, template=False):
                 return row.name if row else ''
             supplier = db.get(Supplier, d['supplier_id']) if d.get('supplier_id') else None
             from inventory_models import Kitchen
-            kitchen = db.get(Kitchen, p.kitchen_id) if p.kitchen_id else None
+            from inventory_locations import production_warehouse
+            wid=production_warehouse(p)
+            kitchen = db.get(Warehouse,wid) if wid else None
             rows.append([p.code, p.name, name('type_id'), name('brand_id'), category_path(db, d.get('category_id')),
                 p.base_uom, '; '.join(f'{k}={v}' for k,v in json.loads(p.uoms).items()), d.get('purchase_uom', p.base_uom),
                 d.get('min_central', '0'), d.get('min_branch', '0'), d.get('ref_price', '0'), supplier.code if supplier else '',
@@ -633,9 +635,13 @@ def import_products(db, user, body):
                 if not supplier: c.fail('Kode supplier tidak ditemukan.')
                 payload['supplier_id'] = supplier.id
             if values.get('dapur'):
-                kitchen = db.query(Kitchen).filter_by(code=str(values['dapur'])).first()
-                if not kitchen: c.fail('Kode dapur tidak ditemukan.')
-                payload['kitchen_id'] = kitchen.id
+                warehouse = db.query(Warehouse).filter_by(code=str(values['dapur'])).first()
+                if not warehouse:
+                    legacy = db.query(Kitchen).filter_by(code=str(values['dapur'])).first()
+                    warehouse = db.get(Warehouse,legacy.warehouse_id) if legacy else None
+                if not warehouse: c.fail('Kode gudang produksi tidak ditemukan.')
+                payload.pop('kitchen_id',None)
+                payload['production_warehouse_id'] = warehouse.id
                 payload['change_reason'] = 'Impor master produk'
             if values.get('status'):
                 if values['status'] not in ('aktif','nonaktif'): c.fail('Status harus aktif/nonaktif.')

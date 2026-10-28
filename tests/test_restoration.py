@@ -137,3 +137,40 @@ def test_document_receipt_atomic_and_reports_scope(client):
     assert client.get('/api/manufacturing/report/valuation').json()==[]
     assert client.get(f'/api/manufacturing/report/valuation?warehouse_id={wh}').status_code==403
     assert cmd(client,'save-settings',{'company':'No'}).status_code==403
+
+
+def test_unified_warehouse_production_assignment_and_capability_guard(client):
+    cat=activate(client)
+    w=ok(cmd(client,'save-warehouse',{'code':'FACTORY','name':'Gudang produksi','kind':'store','can_produce':True,'can_pack':True}))
+    assert w['can_produce'] and w['can_pack']
+    with main.SessionLocal() as db:
+        assert db.query(m.Kitchen).filter_by(warehouse_id=w['id']).count()==0
+    p=make_product(client,'FINISHED',kind='finished',shelf_life_days=3,production_warehouse_id=w['id'])
+    assert p['production_warehouse_id']==w['id'] and p['kitchen_id'] is None
+    assert cmd(client,'save-warehouse',{**w,'can_produce':False}).status_code==409
+    assert cmd(client,'save-warehouse',{**w,'active':False}).status_code==409
+    assert cmd(client,'delete-warehouse',w).status_code==409
+    material=make_product(client,'MAT')
+    recipe=ok(cmd(client,'save-bom',{'product_id':p['id'],'output_qty':40,'materials':[{'product_id':material['id'],'qty':1,'uom':'kg'}],'byproducts':[],'overheads':[]}))
+    assert cmd(client,'activate-bom',{'id':recipe['id']}).status_code==200
+    assert cmd(client,'save-product',{**material,'production_warehouse_id':w['id']}).status_code==422
+    nonprod=next(x for x in cat['warehouses'] if x['kind']=='central')
+    assert cmd(client,'save-product',{**p,'production_warehouse_id':nonprod['id'],'change_reason':'Pindah'}).status_code==422
+
+
+def test_unified_location_upgrade_preserves_balances_and_is_idempotent(client):
+    cat,wh,p,row=setup_stock(client)
+    kitchen=cat['kitchens'][0]
+    finished=make_product(client,'OLD-FINISHED',kind='finished',shelf_life_days=2,kitchen_id=kitchen['id'])
+    before=client.get('/api/manufacturing/stock').json()
+    with main.SessionLocal() as db:
+        db.query(m.ProductionLocation).delete()
+        db.get(m.Control,1).schema_version=8
+        db.commit()
+    inv.initialize(main.engine,main.SessionLocal)
+    inv.initialize(main.engine,main.SessionLocal)
+    assert client.get('/api/manufacturing/stock').json()==before
+    products=client.get('/api/manufacturing/catalog').json()['products']
+    assert next(x for x in products if x['id']==finished['id'])['production_warehouse_id']==kitchen['warehouse_id']
+    with main.SessionLocal() as db:
+        assert db.query(m.ProductionLocation).count()==1

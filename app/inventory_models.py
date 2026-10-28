@@ -263,3 +263,10 @@ class Classification(Base):
     active = Column(Boolean, nullable=False, default=True)
     document = Column(Text, nullable=False, default='{}')
     revision = Column(Integer, nullable=False, default=1)
+
+
+class ProductionLocation(Base):
+    """Canonical assignment: a product is made in a warehouse, not a second location."""
+    __tablename__ = 'inv_production_locations'
+    product_id = Column(Integer, ForeignKey('inv_products.id'), primary_key=True)
+    warehouse_id = Column(Integer, ForeignKey('inv_warehouses.id'), nullable=False)

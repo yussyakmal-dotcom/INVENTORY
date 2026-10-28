@@ -239,7 +239,10 @@ def initialize(engine, sessions):
                 doc.setdefault('rack', '')
                 doc.setdefault('recount', 0)
                 o.document = dump(doc)
-        c.schema_version = max(c.schema_version, 8)
+        if c.schema_version < 9:
+            from inventory_locations import migrate as migrate_locations
+            migrate_locations(db)
+        c.schema_version = max(c.schema_version, 9)
         db.commit()
 
 
@@ -247,6 +250,9 @@ def initialize(engine, sessions):
 def location_dict(item):
     fields = ("id", "code", "name", "kind", "warehouse_id") if isinstance(item, Kitchen) else ("id", "code", "name", "kind", "active")
     result = {key: getattr(item, key) for key in fields}
+    if isinstance(item, Warehouse):
+        from inventory_locations import capabilities
+        result.update(capabilities(item))
     result["version"] = hashlib.sha256(dump(result).encode()).hexdigest()
     return result
 
@@ -309,6 +315,9 @@ def save_location(db, user, body, kitchen=False):
     item.code, item.name, item.kind = code, name, kind
     db.add(item)
     db.flush()
+    if not kitchen:
+        from inventory_locations import save_capabilities
+        save_capabilities(db,item,body)
     return location_dict(item)
 
 
@@ -324,6 +333,9 @@ def delete_location(db, user, body, kitchen=False):
                 db.query(Access).filter_by(warehouse_id=item.id).first())
         if item.kind == "central" and item.active and not db.query(Warehouse).filter(Warehouse.kind == "central", Warehouse.active.is_(True), Warehouse.id != item.id).first():
             fail("Minimal satu Gudang Central harus aktif.", 409)
+    if not kitchen:
+        from inventory_models import ProductionLocation
+        used = used or db.query(ProductionLocation).filter_by(warehouse_id=item.id).first()
     if used:
         fail("Data masih terkait produk, dapur, akses pengguna, atau riwayat transaksi; tidak dapat dihapus.", 409)
     result = {"id": item.id, "deleted": True}
@@ -454,7 +466,8 @@ def migrate(db, user, body, state_model):
 
 def product_dict(p):
     from inventory_restore import attached
-    return {**attached(p, "product"), "id": p.id, "code": p.code, "name": p.name, "kind": p.kind,
+    from inventory_locations import production_warehouse
+    return {**attached(p, "product"), "production_warehouse_id": production_warehouse(p), "id": p.id, "code": p.code, "name": p.name, "kind": p.kind,
             "base_uom": p.base_uom, "uoms": json.loads(p.uoms), "discrete": p.discrete,
             "shelf_life_days": p.shelf_life_days, "kitchen_id": p.kitchen_id,
             "category": product_category(p.kind), "can_have_bom": p.kind in BOM_KINDS,
@@ -492,23 +505,10 @@ def save_product(db, user, body, pid=None):
         fail("Satuan, konversi dan sifat diskret tidak dapat diubah setelah digunakan.")
     days = body.get("shelf_life_days")
     days = None if days is None else integer(days, "Umur simpan", 0)
-    kid = body.get("kitchen_id")
-    kid = None if kid is None else get(db, Kitchen, kid).id
-    if kind in MADE:
-        if days is None:
-            fail("Produk hasil produksi wajib memiliki umur simpan.")
-    if product_category(kind) == "finished":
-        if kid is None:
-            fail("Produk jadi wajib memiliki dapur produksi.")
-        kitchen = get(db, Kitchen, kid)
-        if not get(db, Warehouse, kitchen.warehouse_id).active:
-            fail("Gudang dapur tidak aktif.")
-        if (kind == "package") != (kitchen.kind == "packing"):
-            fail("Paket dibuat di packing; produk lain dibuat di dapur produksi.")
-    elif kid is not None:
-        fail("Penetapan dapur pada master hanya berlaku untuk produk jadi, bukan WIP atau bahan/produk lain.")
-    if pid and p.kitchen_id != kid and not body.get("change_reason"):
-        fail("Perubahan dapur wajib disertai alasan.")
+    from inventory_locations import validate_assignment, assign
+    wid,kid=validate_assignment(db,p,body,kind)
+    if kind in MADE and days is None:
+        fail("Produk hasil produksi wajib memiliki umur simpan.")
     p.code = label(body.get("code"), "Kode produk", 50).upper()
     p.name = label(body.get("name"), "Nama produk", 200)
     p.kind, p.base_uom, p.uoms, p.discrete = kind, base, dump(parsed), discrete
@@ -519,6 +519,7 @@ def save_product(db, user, body, pid=None):
         p.revision += 1
     db.add(p)
     db.flush()
+    assign(db,p,wid)
     from inventory_restore import save_product_profile
     save_product_profile(db, p, body)
     # An edit must not silently invalidate an already active recipe.
@@ -626,7 +627,8 @@ def activate_bom(db, user, bid):
         fail("Hanya BOM draft yang dapat diaktifkan.", 409)
     p = get(db, Product, bom.product_id)
     document = validate_bom(db, p, json.loads(bom.document))
-    if p.shelf_life_days is None or (product_category(p.kind) == "finished" and p.kitchen_id is None):
+    from inventory_locations import production_warehouse
+    if p.shelf_life_days is None or (product_category(p.kind) == "finished" and production_warehouse(p) is None):
         fail("Lengkapi umur simpan; penetapan dapur wajib untuk produk jadi.")
     graph = {}
     for active in db.query(Bom).filter_by(status="active"):
