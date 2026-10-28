@@ -21,6 +21,12 @@ from inventory_models import (Access, Audit, Balance, Base, Bom, Command, Contro
 
 KINDS = {"raw", "packaging", "wip", "finished", "package", "byproduct"}
 MADE = {"wip", "finished", "package", "byproduct"}
+BOM_KINDS = {"finished", "wip", "package"}
+
+
+def product_category(kind):
+    # Packages remain a finished-product subtype, preserving their fixed BOM.
+    return "finished" if kind == "package" else kind
 
 
 def fail(message, code=422):
@@ -176,6 +182,21 @@ def initialize(engine, sessions):
             except IntegrityError:  # Another worker completed initialization.
                 db.rollback()
         acquire_gate(db)
+        c = control(db)
+        if c.schema_version < 2:
+            changes = []
+            for product in db.query(Product).filter(Product.kitchen_id.isnot(None)):
+                if product_category(product.kind) != "finished":
+                    changes.append({"product_id": product.id, "old_kitchen_id": product.kitchen_id})
+                    product.kitchen_id = None
+                    product.revision += 1
+            for recipe in db.query(Bom):
+                if get(db, Product, recipe.product_id).kind not in BOM_KINDS and recipe.status != "retired":
+                    recipe.status = "retired"
+                    recipe.revision += 1
+                    changes.append({"retired_bom_id": recipe.id})
+            db.add(Audit(actor_id=0, operation="schema_v2_product_categories", document=dump(changes)))
+            c.schema_version = 2
         for i in range(1, 12):
             code = f"D{i:02}" if i <= 10 else "PACK"
             name = f"Dapur {i}" if i <= 10 else "Dapur Packing"
@@ -312,6 +333,7 @@ def product_dict(p):
     return {"id": p.id, "code": p.code, "name": p.name, "kind": p.kind,
             "base_uom": p.base_uom, "uoms": json.loads(p.uoms), "discrete": p.discrete,
             "shelf_life_days": p.shelf_life_days, "kitchen_id": p.kitchen_id,
+            "category": product_category(p.kind), "can_have_bom": p.kind in BOM_KINDS,
             "selling_price": str(p.selling_price), "active": p.active, "revision": p.revision}
 
 
@@ -347,11 +369,16 @@ def save_product(db, user, body, pid=None):
     kid = body.get("kitchen_id")
     kid = None if kid is None else get(db, Kitchen, kid).id
     if kind in MADE:
-        if days is None or kid is None:
-            fail("Produk hasil produksi wajib memiliki umur simpan dan dapur.")
+        if days is None:
+            fail("Produk hasil produksi wajib memiliki umur simpan.")
+    if product_category(kind) == "finished":
+        if kid is None:
+            fail("Produk jadi wajib memiliki dapur produksi.")
         kitchen = get(db, Kitchen, kid)
         if (kind == "package") != (kitchen.kind == "packing"):
             fail("Paket dibuat di packing; produk lain dibuat di dapur produksi.")
+    elif kid is not None:
+        fail("Penetapan dapur pada master hanya berlaku untuk produk jadi, bukan WIP atau bahan/produk lain.")
     if pid and p.kitchen_id != kid and not body.get("change_reason"):
         fail("Perubahan dapur wajib disertai alasan.")
     p.code = label(body.get("code"), "Kode produk", 50).upper()
@@ -381,8 +408,8 @@ def quantity_for(p, qty):
 def validate_bom(db, product, body):
     if not isinstance(body, dict):
         fail("Isi BOM tidak valid.")
-    if not product.active or product.kind not in MADE:
-        fail("BOM hanya untuk produk hasil produksi yang aktif.")
+    if not product.active or product.kind not in BOM_KINDS:
+        fail("BOM hanya untuk kategori Produk jadi dan WIP yang aktif. Bahan baku, kemasan, dan produk turunan tidak dapat memiliki BOM.")
     output = quantity_for(product, body.get("output_qty"))
     materials = body.get("materials")
     if not isinstance(materials, list) or not materials or len(materials) > 200:
@@ -420,8 +447,6 @@ def validate_bom(db, product, body):
         p = get(db, Product, b.get("product_id"))
         if p.id == product.id or p.id in seen_by or not p.active or p.kind != "byproduct":
             fail("Pilih SKU turunan aktif, tidak duplikat dan berbeda dari hasil utama.")
-        if p.kitchen_id != product.kitchen_id:
-            fail("Produk turunan harus ditetapkan ke dapur yang sama dengan produk utama.")
         seen_by.add(p.id)
         if number(b.get("unit_cost", 0), "HPP turunan", scale=8) != 0:
             fail("HPP turunan harus Rp0.")
@@ -463,8 +488,8 @@ def activate_bom(db, user, bid):
         fail("Hanya BOM draft yang dapat diaktifkan.", 409)
     p = get(db, Product, bom.product_id)
     document = validate_bom(db, p, json.loads(bom.document))
-    if p.kitchen_id is None or p.shelf_life_days is None:
-        fail("Lengkapi dapur dan umur simpan produk.")
+    if p.shelf_life_days is None or (product_category(p.kind) == "finished" and p.kitchen_id is None):
+        fail("Lengkapi umur simpan; penetapan dapur wajib untuk produk jadi.")
     graph = {}
     for active in db.query(Bom).filter_by(status="active"):
         graph[active.product_id] = [m["product_id"] for m in json.loads(active.document)["materials"]]
@@ -720,6 +745,7 @@ def install(app, sessions, engine, ready_user, get_db, state_model, user_model, 
             if operation == "simulate-bom":
                 b = get(db, Bom, payload.get("id"))
                 p = get(db, Product, b.product_id)
+                validate_bom(db, p, json.loads(b.document))
                 ratio = quantity_for(p, payload.get("target_qty")) / b.output_qty
                 doc = json.loads(b.document)
                 rows = []
@@ -765,3 +791,4 @@ def install(app, sessions, engine, ready_user, get_db, state_model, user_model, 
 
         return execute(db, u, operation, payload, request.headers.get("Idempotency-Key"), action,
                        active=operation != "activate")
+

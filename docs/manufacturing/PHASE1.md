@@ -55,3 +55,10 @@ Pengujian browser: pasang paket Node `playwright` dan Chromium untuk Playwright,
 ## Rollback
 
 Sebelum cutover, aplikasi lama tetap memakai datanya dan branch lama dapat dipakai kembali. Setelah cutover dan ada transaksi baru, jangan menyalakan versi aplikasi lama pada database yang sama: JSON lama sudah menjadi arsip dan tidak memuat transaksi baru. Rollback harus memakai backup salinan serta rekonsiliasi/replay mutasi setelah cutover; jangan menghapus volume atau menonaktifkan marker secara manual.
+
+
+## Koreksi kategori produk
+
+Penetapan dapur di master hanya berlaku untuk Produk jadi. WIP, bahan baku, kemasan dan produk turunan tidak mempunyai penetapan dapur. BOM hanya boleh dimiliki Produk jadi dan WIP; paket adalah subjenis Produk jadi untuk mempertahankan BOM paket tetap. Aturan ini menggantikan cakupan penetapan dapur pada spesifikasi sebelumnya.
+
+Upgrade schema v2 melepas penetapan dapur yang keliru pada produk nonjadi dan mengarsipkan BOM kategori yang tidak diperbolehkan, dengan audit tanpa menghapus stok atau histori.

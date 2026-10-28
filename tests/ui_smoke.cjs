@@ -43,7 +43,7 @@ const assert = require('node:assert/strict');
     await clickTab('Produk');
     await saveProduct('SMOKE-FLOUR','Tepung uji','raw','kg',null,null);
     await saveProduct('SMOKE-BREAD','Roti uji','finished','pcs',3,'D01 · Dapur 1');
-    await saveProduct('SMOKE-WHITE','Putih telur uji','byproduct','kg',2,'D01 · Dapur 1');
+    await saveProduct('SMOKE-WHITE','Putih telur uji','byproduct','kg',2,null);
     await clickTab('BOM');
     await page.locator('[name=product_id]').selectOption({label:'SMOKE-BREAD · Roti uji'});
     await page.locator('[name=output_qty]').fill('40');
@@ -105,3 +105,4 @@ const assert = require('node:assert/strict');
     console.log('Browser smoke passed: activate, 11 kitchens, product/BOM, simulation, receipt, partial/full transfer, mobile layout.');
   } finally { await browser.close(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});
+

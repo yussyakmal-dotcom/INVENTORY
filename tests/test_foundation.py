@@ -172,9 +172,9 @@ def test_bom_versions_zero_overhead_simulation_and_immutability(client):
 def test_bom_indirect_cycle_and_byproduct_cost(client):
     cat = activate(client)
     kid = cat["kitchens"][0]["id"]
-    a = make_product(client, "A", kind="wip", shelf_life_days=2, kitchen_id=kid)
-    b = make_product(client, "B", kind="wip", shelf_life_days=2, kitchen_id=kid)
-    by = make_product(client, "WHITE", kind="byproduct", shelf_life_days=2, kitchen_id=kid, selling_price="10000")
+    a = make_product(client, "A", kind="wip", shelf_life_days=2)
+    b = make_product(client, "B", kind="wip", shelf_life_days=2)
+    by = make_product(client, "WHITE", kind="byproduct", shelf_life_days=2, selling_price="10000")
     first = bom(client, a["id"], b["id"], byproducts=[{"product_id": by["id"], "qty": "1", "unit_cost": "0"}])
     assert cmd(client, "activate-bom", {"id": first["id"]}).status_code == 200
     cycle = bom(client, b["id"], a["id"])
@@ -300,7 +300,7 @@ def test_frontend_assets_and_authentication(client):
 
 def test_bad_nested_bom_payloads_fail_cleanly(client):
     cat = activate(client)
-    p = make_product(client, "WIP", kind="wip", shelf_life_days=2, kitchen_id=cat["kitchens"][0]["id"])
+    p = make_product(client, "WIP", kind="wip", shelf_life_days=2)
     material = make_product(client)
     for field, bad in [("materials", [None]), ("overheads", None), ("overheads", [None]), ("byproducts", {})]:
         r = cmd(client, "save-bom", {"product_id": p["id"], "output_qty": "1", "materials": [{"product_id": material["id"], "qty": "1"}], field: bad})
@@ -344,3 +344,21 @@ def test_bom_uom_conversion_and_discrete_scaling(client):
     r = cmd(client, "simulate-bom", {"id": b["id"], "target_qty": 80})
     assert r.status_code == 200 and float(r.json()["materials"][0]["base_qty"]) == 25
     assert cmd(client, "simulate-bom", {"id": b["id"], "target_qty": "1.5"}).status_code == 422
+
+
+@pytest.mark.parametrize('kind', ['raw', 'packaging', 'byproduct'])
+def test_non_finished_cannot_own_kitchen_or_bom(client, kind):
+    cat = activate(client)
+    p = make_product(client, 'NONFINISHED', kind=kind, shelf_life_days=3)
+    material = make_product(client)
+    assert cmd(client, 'save-product', {**p, 'kitchen_id': cat['kitchens'][0]['id'], 'change_reason': 'test'}).status_code == 422
+    assert cmd(client, 'save-bom', {'product_id': p['id'], 'output_qty': '1', 'materials': [{'product_id': material['id'], 'qty': '1'}]}).status_code == 422
+
+
+def test_wip_bom_activates_without_master_kitchen(client):
+    activate(client)
+    p = make_product(client, 'WIP', kind='wip', shelf_life_days=3)
+    raw = make_product(client)
+    b = bom(client, p['id'], raw['id'])
+    assert p['kitchen_id'] is None
+    assert cmd(client, 'activate-bom', {'id': b['id']}).status_code == 200
