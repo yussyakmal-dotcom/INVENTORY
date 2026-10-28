@@ -31,9 +31,9 @@ def key():
 
 def cmd(client, operation, body, request_key=None):
     if operation == "ship":
-        body = {"document_number": body.get("reference", "TEST-DOC"), "shipped_date": inv.today().isoformat(), **body}
+        body = {"sender_name": "Pengirim Uji", "vehicle_number": "BE 1234 AA", "document_number": body.get("reference", "TEST-DOC"), "shipped_date": inv.today().isoformat(), **body}
     if operation == "receive-transfer":
-        body = {"received_date": inv.today().isoformat(), **body}
+        body = {"receiver_name": "Penerima Uji", "received_date": inv.today().isoformat(), **body}
     return client.post("/api/manufacturing/commands/" + operation, json=body,
                        headers={"Idempotency-Key": request_key or key()})
 
@@ -497,3 +497,60 @@ def test_existing_transfer_document_upgrade_is_repeatable(client):
     assert rows[0]['reference'] == 'OLD-REF' and rows[0]['legacy'] is True
     assert rows[0]['receipts'] == []
     assert rows[0]['shipped_date'] == inv.today().isoformat()
+
+
+def test_do_dispatch_and_receiver_required_persisted_per_receipt(client):
+    cat = activate(client)
+    source, dest = central(cat), cat['kitchens'][0]['warehouse_id']
+    p = make_product(client)
+    receipt(client, source, p['id'], qty='10')
+    body = {'source_id': source, 'destination_id': dest, 'document_number': 'DO-NAMES',
+            'shipped_date': inv.today().isoformat(), 'product_id': p['id'], 'qty': '3',
+            'sender_name': '  Andi <Pengirim>  ', 'vehicle_number': ' be 1234 aa '}
+    for field in ['sender_name', 'vehicle_number']:
+        for invalid in ['', '   ', None, 'X' * 151]:
+            assert cmd(client, 'ship', {**body, field: invalid}).status_code == 422
+        missing = {k: v for k, v in body.items() if k != field}
+        assert client.post('/api/manufacturing/commands/ship', json=missing,
+                           headers={'Idempotency-Key': key()}).status_code == 422
+    assert client.get('/api/manufacturing/transfers').json() == []
+    result = cmd(client, 'ship', body)
+    assert result.status_code == 200, result.text
+    t = result.json()
+    assert t['sender_name'] == 'Andi <Pengirim>' and t['vehicle_number'] == 'BE 1234 AA'
+    rbody = {'id': t['id'], 'received_date': inv.today().isoformat(),
+             'lines': [{'id': t['lines'][0]['id'], 'qty': '1'}]}
+    assert client.post('/api/manufacturing/commands/receive-transfer', json=rbody,
+                       headers={'Idempotency-Key': key()}).status_code == 422
+    for invalid in ['', '  ', None, 'X' * 151]:
+        assert cmd(client, 'receive-transfer', {**rbody, 'receiver_name': invalid}).status_code == 422
+    first = cmd(client, 'receive-transfer', {**rbody, 'receiver_name': 'Budi'}).json()
+    assert first['receipts'][0]['receiver_name'] == 'Budi'
+    token = key()
+    last_body = {**rbody, 'receiver_name': 'Sari', 'lines': [{'id': t['lines'][0]['id'], 'qty': '2'}]}
+    final = cmd(client, 'receive-transfer', last_body, token).json()
+    assert cmd(client, 'receive-transfer', last_body, token).json() == final
+    stored = client.get('/api/manufacturing/transfers').json()[0]
+    assert stored['status'] == 'received'
+    assert [r['receiver_name'] for r in stored['receipts']] == ['Budi', 'Sari']
+    assert stored['sender_name'] == 'Andi <Pengirim>'
+
+
+def test_do_identity_upgrade_does_not_invent_legacy_names(client):
+    cat = activate(client)
+    p = make_product(client)
+    receipt(client, central(cat), p['id'], qty='2')
+    t = cmd(client, 'ship', {'source_id': central(cat), 'destination_id': cat['kitchens'][0]['warehouse_id'],
+                           'product_id': p['id'], 'qty': '2'}).json()
+    cmd(client, 'receive-transfer', {'id': t['id'], 'lines': [{'id': t['lines'][0]['id'], 'qty': '1'}]})
+    with main.SessionLocal() as db:
+        db.query(m.TransferReceiver).delete()
+        db.query(m.TransferDispatch).delete()
+        db.get(m.Control, 1).schema_version = 4
+        db.commit()
+    inv.initialize(main.engine, main.SessionLocal)
+    inv.initialize(main.engine, main.SessionLocal)
+    old = client.get('/api/manufacturing/transfers').json()[0]
+    assert old['sender_name'] is None and old['vehicle_number'] is None
+    assert old['receipts'][0]['receiver_name'] is None
+    assert old['status'] == 'partial' and float(old['lines'][0]['remaining']) == 1

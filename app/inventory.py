@@ -17,7 +17,8 @@ from sqlalchemy.exc import IntegrityError
 
 from inventory_models import (Access, Audit, Balance, Base, Bom, Command, Control,
                               Kitchen, Lot, Movement, Product, Transfer,
-                              TransferLine, TransferDocument, TransferReceipt, TransferReceiptLine, Warehouse, now)
+                              TransferLine, TransferDocument, TransferReceipt, TransferReceiptLine,
+                              TransferDispatch, TransferReceiver, Warehouse, now)
 
 KINDS = {"raw", "packaging", "wip", "finished", "package", "byproduct"}
 MADE = {"wip", "finished", "package", "byproduct"}
@@ -216,6 +217,9 @@ def initialize(engine, sessions):
                     shipped = transfer.created_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Asia/Jakarta")).date()
                     db.add(TransferDocument(transfer_id=transfer.id, document_number=f"TRF-{transfer.id}", shipped_date=shipped, legacy=True))
             c.schema_version = 4
+        if c.schema_version < 5:
+            # Additive identity tables: old documents retain unknown identities.
+            c.schema_version = 5
         db.commit()
 
 
@@ -703,6 +707,8 @@ def ship(db, user, body):
     dst = get(db, Warehouse, body.get("destination_id"))
     if not dst.active or src.id == dst.id:
         fail("Gudang tujuan harus aktif dan berbeda dari asal.")
+    sender_name = label(body.get("sender_name"), "Nama petugas pengirim", 150)
+    vehicle_number = label(body.get("vehicle_number"), "Nomor kendaraan pengirim", 50).upper()
     doc_no = label(body.get("document_number"), "Nomor dokumen kirim", 150).upper()
     shipped_date = document_date(body.get("shipped_date"), "Tanggal kirim")
     if db.query(TransferDocument).filter_by(document_number=doc_no).first():
@@ -725,6 +731,7 @@ def ship(db, user, body):
     db.add(transfer)
     db.flush()
     db.add(TransferDocument(transfer_id=transfer.id, document_number=doc_no, shipped_date=shipped_date))
+    db.add(TransferDispatch(transfer_id=transfer.id, sender_name=sender_name, vehicle_number=vehicle_number))
     for balance, lot, qty in picks:
         balance.qty -= qty
         db.add(TransferLine(transfer_id=transfer.id, lot_id=lot.id, shipped_qty=qty, received_qty=0))
@@ -735,6 +742,8 @@ def ship(db, user, body):
 
 def transfer_dict(db, t):
     doc = db.get(TransferDocument, t.id)
+    dispatch = db.get(TransferDispatch, t.id)
+    receiver_names = {r.receipt_id: r.receiver_name for r in db.query(TransferReceiver).join(TransferReceipt, TransferReceipt.id == TransferReceiver.receipt_id).filter(TransferReceipt.transfer_id == t.id)}
     lines = []
     for line in db.query(TransferLine).filter_by(transfer_id=t.id).order_by(TransferLine.id):
         lot = get(db, Lot, line.lot_id)
@@ -745,12 +754,14 @@ def transfer_dict(db, t):
                       "shipped_qty": str(line.shipped_qty), "received_qty": str(line.received_qty),
                       "remaining": str(line.shipped_qty - line.received_qty)})
     receipts = [{"id": r.id, "received_date": str(r.received_date), "actor_id": r.actor_id,
-                 "recorded_at": str(r.created_at),
+                 "recorded_at": str(r.created_at), "receiver_name": receiver_names.get(r.id),
                  "lines": [{"id": l.transfer_line_id, "qty": str(l.qty)} for l in db.query(TransferReceiptLine).filter_by(receipt_id=r.id)]}
                 for r in db.query(TransferReceipt).filter_by(transfer_id=t.id).order_by(TransferReceipt.id)]
     return {"id": t.id, "source_id": t.source_id, "destination_id": t.destination_id,
             "reference": t.reference, "status": t.status, "document_number": doc.document_number,
             "shipped_date": str(doc.shipped_date), "legacy": doc.legacy,
+            "sender_name": dispatch.sender_name if dispatch else None,
+            "vehicle_number": dispatch.vehicle_number if dispatch else None,
             "receipts": receipts, "lines": lines}
 
 
@@ -763,9 +774,11 @@ def receive_transfer(db, user, tid, body):
     received_date = document_date(body.get("received_date"), "Tanggal terima")
     if received_date < doc.shipped_date:
         fail("Tanggal terima tidak boleh sebelum tanggal kirim.")
+    receiver_name = label(body.get("receiver_name"), "Nama petugas penerima", 150)
     receipt = TransferReceipt(transfer_id=t.id, received_date=received_date, actor_id=user.id)
     db.add(receipt)
     db.flush()
+    db.add(TransferReceiver(receipt_id=receipt.id, receiver_name=receiver_name))
     lines = {l.id: l for l in db.query(TransferLine).filter_by(transfer_id=t.id)}
     entries = body.get("lines")
     if not isinstance(entries, list) or not entries:

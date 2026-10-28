@@ -155,6 +155,19 @@ class TransferReceiptLine(Base):
     __table_args__ = (UniqueConstraint("receipt_id", "transfer_line_id"), CheckConstraint("qty > 0"))
 
 
+class TransferDispatch(Base):
+    __tablename__ = "inv_transfer_dispatch"
+    transfer_id = Column(Integer, ForeignKey("inv_transfers.id"), primary_key=True)
+    sender_name = Column(String(150), nullable=False)
+    vehicle_number = Column(String(50), nullable=False)
+
+
+class TransferReceiver(Base):
+    __tablename__ = "inv_transfer_receivers"
+    receipt_id = Column(Integer, ForeignKey("inv_transfer_receipts.id"), primary_key=True)
+    receiver_name = Column(String(150), nullable=False)
+
+
 class Movement(Base):
     __tablename__ = "inv_movements"
     id = Column(Integer, primary_key=True)

@@ -87,3 +87,11 @@ API: `save-warehouse`, `delete-warehouse`, `save-kitchen`, `delete-kitchen` mela
 - Schema versi 4 menambahkan tabel dokumen dan riwayat penerimaan tanpa mengubah saldo. Transfer lama mendapat nomor `TRF-ID` dan tanggal kirim dari timestamp pencatatan (WIB); referensi lama tetap tersimpan. Tanggal penerimaan lama tidak direkayasa.
 
 API `ship`: `document_number`, `shipped_date`, `source_id`, `destination_id`, `lines: [{product_id, qty}]`. Bentuk satu barang `product_id`/`qty` juga diterima, tetapi tanggal dan nomor dokumen tetap wajib. API `receive-transfer`: `id`, `received_date`, `lines: [{id, qty}]`, dengan `id` baris transfer (lot). Catalog transfer menyertakan detail barang dan `receipts` untuk seluruh riwayat penerimaan setelah pembaruan.
+
+## Petugas, kendaraan, dan cetak Delivery Order
+
+Pengiriman baru wajib mengisi `sender_name` (nama petugas pengirim, maksimal 150 karakter) dan `vehicle_number` (nomor kendaraan, maksimal 50 karakter, disimpan huruf besar). Penerimaan baru wajib mengisi `receiver_name` (maksimal 150 karakter) untuk setiap penerimaan sebagian. Nama petugas fisik terpisah dari akun pengguna yang mencatat transaksi; keduanya tetap tersimpan.
+
+Pilih nomor dokumen di menu Transfer lalu tekan **Cetak DO**. Dialog cetak browser dapat digunakan untuk printer atau Simpan sebagai PDF. Format A4 memuat nomor/tanggal DO, gudang asal/tujuan, pengirim, kendaraan, barang per batch, satuan, qty kirim, tempat tanda tangan, dan riwayat penerimaan beserta nama petugas jika sudah ada. Cetak tidak mengubah stok maupun status dokumen.
+
+Schema versi 5 menambahkan tabel identitas pengiriman dan penerimaan tanpa mengubah transaksi lama. Identitas yang belum pernah dicatat ditampilkan sebagai **Belum tercatat**, bukan diambil otomatis dari akun pengguna.

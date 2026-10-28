@@ -6,6 +6,25 @@
   <title>Fondasi Manufaktur · INVENTORY</title>
   <style>
     :root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#18372e;background:#f1f5f2;font-size:15px}*{box-sizing:border-box}body{margin:0}a{color:#186747}button,input,select{font:inherit}button{cursor:pointer;border:1px solid #c5d3ca;background:white;color:#18372e;border-radius:8px;padding:9px 14px}button:hover{background:#e5efe8}button.primary{background:#176448;color:white;border-color:#176448}button:disabled{opacity:.5;cursor:wait}input,select{width:100%;padding:9px 10px;border:1px solid #bccdc2;border-radius:7px;background:white;color:#18372e}input[type=checkbox]{width:auto}label{display:block;font-size:13px;font-weight:600}label input,label select{display:block;margin-top:6px}header{background:#153e30;color:white;padding:22px max(24px,calc((100vw - 1220px)/2));display:flex;align-items:center;gap:20px}header h1{font-size:22px;margin:0}header p{margin:5px 0 0;color:#c5dacf;font-size:13px}header a{color:#d8efdf}header .right{margin-left:auto;text-align:right;font-size:13px}.wrap{max-width:1268px;padding:24px;margin:auto}nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:22px}nav button[aria-current]{background:#d1e8d8;border-color:#176448;font-weight:700}section,.card{background:white;border:1px solid #dbe4de;border-radius:12px;padding:22px;margin-bottom:18px}h2{font-size:23px;margin:0 0 8px}h3{margin:0 0 16px;font-size:17px}p{line-height:1.6}.muted{color:#61796b;font-size:13px}.notice{padding:14px 18px;background:#fff2d8;border:1px solid #e1ce98;border-radius:8px;margin-bottom:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin:18px 0}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px;margin-top:15px}th,td{text-align:left;padding:12px 10px;border-bottom:1px solid #e2e9e4;vertical-align:top}th{font-size:12px;color:#61796b;background:#f6f9f6}td small{display:block;color:#61796b;margin-top:4px}td input,td select{min-width:110px}.chip{display:inline-block;border-radius:20px;padding:4px 9px;background:#e1f1e7;font-size:12px;white-space:nowrap}.chip.warn{background:#fff0d4;color:#785009}.empty{padding:30px;color:#61796b;text-align:center}#message{position:sticky;top:12px;padding:14px 18px;border-radius:8px;background:#dff1e5;z-index:5;white-space:pre-line}#message.error{background:#fde6df;color:#7d2e1f}#message:empty{display:none}form{margin-top:16px}.stat{font-size:26px;font-weight:700}.kitchen{display:flex;align-items:center;gap:14px}.code{font-size:15px;font-weight:700;background:#e5f0e8;padding:12px;border-radius:10px}.login{max-width:460px;margin:65px auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}details{margin-top:12px}summary{cursor:pointer;color:#176448}.danger{color:#962f23}#busy{margin-left:8px;font-size:13px}footer{font-size:12px;color:#61796b;margin-top:22px}@media(max-width:650px){header{padding:18px;align-items:start}header h1{font-size:19px}.wrap{padding:15px}section{padding:16px}th,td{padding:10px 6px}.grid{grid-template-columns:1fr}header .right{max-width:120px}}
+    #do-print{display:none}
+    @media print{
+      @page{size:A4 portrait;margin:15mm}
+      body{background:white;color:black;font:11pt Arial,sans-serif}
+      body:has(#do-print)>header,body:has(#do-print)>main{display:none!important}
+      #do-print{display:block;overflow-wrap:anywhere}
+      #do-print h1{font-size:20pt;margin:0 0 8pt}
+      #do-print h2{font-size:14pt;margin:0 0 12pt}
+      #do-print h3{font-size:12pt;margin-top:18pt}
+      #do-print .do-meta{display:grid;grid-template-columns:1fr 1fr;gap:18pt}
+      #do-print .scroll{overflow:visible}
+      #do-print table{font-size:10pt;table-layout:fixed}
+      #do-print th,#do-print td{color:black;border:1px solid #777;padding:6pt}
+      #do-print thead{display:table-header-group}
+      #do-print tr{break-inside:avoid}
+      #do-print .do-signatures{display:grid;grid-template-columns:1fr 1fr;gap:30pt;break-inside:avoid;margin-top:18pt}
+      #do-print .signature-space{height:40pt}
+      #do-print .do-note{font-size:9pt;color:#444;margin-top:16pt}
+    }
   </style>
   <script src="/static/manufacturing.js" defer></script>
 </head>
