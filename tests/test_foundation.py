@@ -3,6 +3,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 import secrets
 import sys
@@ -569,3 +570,178 @@ def test_manufacturing_page_versions_script_and_disables_cache(client):
     assert "input('sender_name'" in script.text
     assert "input('vehicle_number'" in script.text
     assert 'Cetak DO' in script.text
+
+
+def operation(client, ident):
+    return next(o for o in client.get('/api/manufacturing/operations').json()['documents'] if o['id'] == ident)
+
+
+def decide(client, action, o, **extra):
+    return cmd(client, action, {'id': o['id'], 'revision': o['revision'], 'reason': 'Diperiksa', **extra})
+
+
+def po_fixture(client):
+    cat = activate(client)
+    p = make_product(client)
+    supplier = cmd(client, 'save-supplier', {'code': 'S1', 'name': 'Supplier 1', 'contact': 'Lampung'}).json()
+    body = {'number': 'PO-001', 'document_date': inv.today().isoformat(), 'warehouse_id': central(cat),
+            'supplier_id': supplier['id'], 'lines': [{'product_id': p['id'], 'qty': '10', 'unit_price': '12000'}]}
+    r = cmd(client, 'save-po', body)
+    assert r.status_code == 200, r.text
+    return cat, p, body, r.json()
+
+
+def po_receipt_body(o, p, qty='4', reference='SJ-001'):
+    return {'id': o['id'], 'revision': o['revision'], 'reference': reference,
+            'received_date': inv.today().isoformat(), 'receiver_name': 'Petugas Gudang',
+            'lines': [{'product_id': p['id'], 'qty': qty, 'batch_number': reference,
+                       'expiry_date': (inv.today()+timedelta(days=10)).isoformat()}]}
+
+
+def test_po_draft_approval_partial_receipts_and_close(client):
+    cat, p, body, o = po_fixture(client)
+    assert o['status'] == 'draft' and Decimal(o['data']['total']) == 120000
+    assert cmd(client, 'receive-po', po_receipt_body(o, p)).status_code == 409
+    edited = cmd(client, 'save-po', {**body, 'id': o['id'], 'revision': o['revision']}).json()
+    assert decide(client, 'submit-po', o).status_code == 409
+    o = decide(client, 'submit-po', edited).json()
+    assert o['status'] == 'pending'
+    o = decide(client, 'approve-operation', o).json()
+    assert o['status'] == 'approved'
+    assert cmd(client, 'save-po', {**body, 'id': o['id'], 'revision': o['revision']}).status_code == 409
+    token = key()
+    received_body = po_receipt_body(o, p)
+    r = cmd(client, 'receive-po', received_body, token)
+    assert r.status_code == 200, r.text
+    o = r.json()
+    assert cmd(client, 'receive-po', received_body, token).json() == o
+    assert o['status'] == 'partial' and o['data']['receipts'][0]['receiver_name'] == 'Petugas Gudang'
+    assert cmd(client, 'receive-po', po_receipt_body(o, p)).status_code == 409
+    assert cmd(client, 'receive-po', po_receipt_body(o, p, qty='7', reference='SJ-002')).status_code == 409
+    rows = client.get('/api/manufacturing/stock').json()
+    assert len(rows) == 1 and Decimal(rows[0]['qty']) == 4 and Decimal(rows[0]['unit_cost']) == 12000
+    closed = decide(client, 'close-po', o).json()
+    assert closed['status'] == 'closed' and Decimal(closed['data']['lines'][0]['received_qty']) == 4
+    assert cmd(client, 'receive-po', po_receipt_body(closed, p, reference='SJ-003')).status_code == 409
+
+
+def test_po_full_receipt_atomic_invalid_lines_and_rejection(client):
+    cat, p, body, o = po_fixture(client)
+    o = decide(client, 'submit-po', o).json()
+    rejected = decide(client, 'reject-operation', o).json()
+    assert rejected['status'] == 'rejected'
+    assert decide(client, 'approve-operation', rejected).status_code == 409
+    o = cmd(client, 'save-po', {**body, 'number': 'PO-002'}).json()
+    o = decide(client, 'submit-po', o).json()
+    o = decide(client, 'approve-operation', o).json()
+    bad = po_receipt_body(o, p)
+    bad['lines'] += [{'product_id': p['id'], 'qty': '1', 'batch_number': 'B2', 'expiry_date': 'invalid'}]
+    assert cmd(client, 'receive-po', bad).status_code == 422
+    assert client.get('/api/manufacturing/stock').json() == []
+    assert operation(client, o['id'])['data']['receipts'] == []
+    r = cmd(client, 'receive-po', po_receipt_body(o, p, qty='10')).json()
+    assert r['status'] == 'received'
+    assert decide(client, 'close-po', r).status_code == 409
+
+
+def count_fixture(client):
+    cat = activate(client)
+    p = make_product(client)
+    wh = central(cat)
+    receipt(client, wh, p['id'], qty='10')
+    rows = client.get('/api/manufacturing/stock').json()
+    return cat, p, wh, rows[0]
+
+
+def test_opname_freezes_stock_and_posts_difference_once(client):
+    cat, p, wh, row = count_fixture(client)
+    o = cmd(client, 'start-opname', {'number': 'OP-001', 'warehouse_id': wh, 'document_date': inv.today().isoformat()}).json()
+    assert o['status'] == 'draft'
+    assert cmd(client, 'start-opname', {'number': 'OP-002', 'warehouse_id': wh, 'document_date': inv.today().isoformat()}).status_code == 409
+    assert cmd(client, 'usage', {'warehouse_id': wh, 'product_id': p['id'], 'qty': '1', 'reference': 'BLOCKED'}).status_code == 409
+    assert cmd(client, 'ship', {'source_id': wh, 'destination_id': cat['kitchens'][0]['warehouse_id'], 'product_id': p['id'], 'qty': '1'}).status_code == 409
+    assert cmd(client, 'receipt', {'warehouse_id': wh, 'product_id': p['id']}).status_code == 409
+    b = {'id': o['id'], 'revision': o['revision'], 'counted_by': 'Penghitung', 'reason': 'Hitung fisik',
+         'lines': [{'balance_id': row['balance_id'], 'counted_qty': '8'}],
+         'new_lots': [{'product_id': p['id'], 'counted_qty': '2', 'batch_number': 'TEMUAN', 'unit_cost': '9000',
+                       'expiry_date': (inv.today()-timedelta(days=1)).isoformat()}]}
+    o = cmd(client, 'submit-opname', b).json()
+    assert o['status'] == 'pending'
+    assert Decimal(client.get('/api/manufacturing/stock').json()[0]['qty']) == 10
+    token = key()
+    decision = {'id': o['id'], 'revision': o['revision'], 'reason': 'Sesuai fisik'}
+    result = cmd(client, 'approve-operation', decision, token)
+    assert result.status_code == 200, result.text
+    assert cmd(client, 'approve-operation', decision, token).json() == result.json()
+    rows = client.get('/api/manufacturing/stock').json()
+    assert sum(Decimal(r['qty']) for r in rows) == 10
+    assert next(r for r in rows if r['batch_number'] == 'TEMUAN')['usable'] is False
+    assert len([m for m in client.get('/api/manufacturing/movements').json() if m['kind'] == 'OPNAME']) == 2
+    assert cmd(client, 'usage', {'warehouse_id': wh, 'product_id': p['id'], 'qty': '1', 'reference': 'AFTER'}).status_code == 200
+    assert decide(client, 'approve-operation', result.json()).status_code == 409
+
+
+def test_scrap_holds_stock_and_only_approval_deducts(client):
+    cat, p, wh, row = count_fixture(client)
+    body = {'number': 'SC-001', 'warehouse_id': wh, 'document_date': inv.today().isoformat(), 'reason': 'Rusak',
+            'lines': [{'balance_id': row['balance_id'], 'qty': '3'}]}
+    o = cmd(client, 'request-scrap', body).json()
+    assert o['status'] == 'pending'
+    s = client.get('/api/manufacturing/stock').json()[0]
+    assert Decimal(s['qty']) == 10 and Decimal(s['available_qty']) == 7
+    assert cmd(client, 'usage', {'warehouse_id': wh, 'product_id': p['id'], 'qty': '8', 'reference': 'HOLD'}).status_code == 409
+    assert cmd(client, 'start-opname', {'number': 'OP-1', 'warehouse_id': wh, 'document_date': inv.today().isoformat()}).status_code == 409
+    assert cmd(client, 'request-scrap', {**body, 'number': 'SC-002', 'lines': [{'balance_id': row['balance_id'], 'qty': '8'}]}).status_code == 409
+    assert cmd(client, 'usage', {'warehouse_id': wh, 'product_id': p['id'], 'qty': '7', 'reference': 'UNRESERVED'}).status_code == 200
+    result = decide(client, 'approve-operation', o)
+    assert result.status_code == 200, result.text
+    assert client.get('/api/manufacturing/stock').json() == []
+    assert len([m for m in client.get('/api/manufacturing/movements').json() if m['kind'] == 'SCRAP']) == 1
+    assert decide(client, 'approve-operation', result.json()).status_code == 409
+
+
+def test_scrap_rejection_and_opname_cancel_unlock(client):
+    cat, p, wh, row = count_fixture(client)
+    o = cmd(client, 'request-scrap', {'number': 'SC-X', 'warehouse_id': wh, 'document_date': inv.today().isoformat(), 'reason': 'Rusak', 'lines': [{'balance_id': row['balance_id'], 'qty': '2'}]}).json()
+    assert decide(client, 'reject-operation', o).json()['status'] == 'rejected'
+    assert Decimal(client.get('/api/manufacturing/stock').json()[0]['available_qty']) == 10
+    o = cmd(client, 'start-opname', {'number': 'OP-X', 'warehouse_id': wh, 'document_date': inv.today().isoformat()}).json()
+    assert decide(client, 'cancel-operation', o).json()['status'] == 'cancelled'
+    assert cmd(client, 'usage', {'warehouse_id': wh, 'product_id': p['id'], 'qty': '1', 'reference': 'UNLOCK'}).status_code == 200
+
+
+def test_operations_roles_scope_and_master_protection(client):
+    cat, p, body, o = po_fixture(client)
+    product = client.get('/api/manufacturing/catalog').json()['products'][0]
+    assert cmd(client, 'save-product', {**product, 'base_uom': 'pcs'}).status_code == 422
+    wh = next(w for w in cat['warehouses'] if w['id'] == central(cat))
+    assert cmd(client, 'save-warehouse', {**wh, 'active': False}).status_code == 409
+    with main.SessionLocal() as db:
+        u = db.query(main.User).filter_by(username='admin').one()
+        u.role = 'purchasing'
+        uid = u.id
+        db.commit()
+    assert client.get('/api/manufacturing/operations').json()['documents'] == []
+    assert decide(client, 'submit-po', o).status_code == 403
+    with main.SessionLocal() as db:
+        db.add(m.Access(user_id=uid, warehouse_id=central(cat)))
+        db.commit()
+    o = decide(client, 'submit-po', o).json()
+    assert o['status'] == 'pending'
+    assert decide(client, 'approve-operation', o).status_code == 403
+    assert cmd(client, 'request-scrap', {}).status_code == 403
+    with main.SessionLocal() as db:
+        db.get(main.User, uid).role = 'approver'
+        db.commit()
+    assert decide(client, 'approve-operation', o).json()['status'] == 'approved'
+    assert cmd(client, 'save-po', body).status_code == 403
+    assert cmd(client, 'save-supplier', {'code': 'S2', 'name': 'Forbidden'}).status_code == 403
+
+
+def test_concurrent_scrap_decisions_do_not_double_post(client):
+    cat, p, wh, row = count_fixture(client)
+    o = cmd(client, 'request-scrap', {'number': 'SC-CONCURRENT', 'warehouse_id': wh, 'document_date': inv.today().isoformat(), 'reason': 'Rusak', 'lines': [{'balance_id': row['balance_id'], 'qty': '2'}]}).json()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: decide(client, 'approve-operation', o).status_code, range(2)))
+    assert sorted(results) == [200, 409]
+    assert Decimal(client.get('/api/manufacturing/stock').json()[0]['qty']) == 8

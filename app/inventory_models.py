@@ -199,3 +199,30 @@ class Command(Base):
     response = Column(BigText, nullable=False)
     __table_args__ = (UniqueConstraint("actor_id", "operation", "request_key"),)
 
+
+
+class Supplier(Base):
+    __tablename__ = 'inv_suppliers'
+    id = Column(Integer, primary_key=True)
+    code = Column(String(50), nullable=False, unique=True)
+    name = Column(String(200), nullable=False)
+    contact = Column(String(250), nullable=False, default='')
+    active = Column(Boolean, nullable=False, default=True)
+    revision = Column(Integer, nullable=False, default=1)
+
+
+class Operation(Base):
+    __tablename__ = 'inv_operations'
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(20), nullable=False, index=True)
+    number = Column(String(100), nullable=False, unique=True)
+    warehouse_id = Column(Integer, ForeignKey('inv_warehouses.id'), nullable=False, index=True)
+    supplier_id = Column(Integer, ForeignKey('inv_suppliers.id'))
+    status = Column(String(20), nullable=False)
+    revision = Column(Integer, nullable=False, default=1)
+    document_date = Column(Date, nullable=False)
+    document = Column(BigText, nullable=False)
+    created_by = Column(Integer, nullable=False)
+    approved_by = Column(Integer)
+    created_at = Column(DateTime, nullable=False, default=now)
+    decided_at = Column(DateTime)

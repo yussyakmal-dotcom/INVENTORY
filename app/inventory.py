@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from inventory_models import (Access, Audit, Balance, Base, Bom, Command, Control,
                               Kitchen, Lot, Movement, Product, Transfer,
                               TransferLine, TransferDocument, TransferReceipt, TransferReceiptLine,
-                              TransferDispatch, TransferReceiver, Warehouse, now)
+                              TransferDispatch, TransferReceiver, Operation, Warehouse, now)
 
 KINDS = {"raw", "packaging", "wip", "finished", "package", "byproduct"}
 MADE = {"wip", "finished", "package", "byproduct"}
@@ -127,6 +127,10 @@ def warehouse_access(db, user, wid, write=True):
     ids = allowed_warehouses(db, user)
     if ids is not None and wh.id not in ids:
         fail("Gudang di luar lingkup pengguna.", 403)
+    if write:
+        from inventory_operations import freeze
+        if freeze(db, wh.id):
+            fail("Gudang sedang opname; selesaikan atau batalkan opname sebelum mutasi stok.", 409)
     return wh
 
 
@@ -221,6 +225,8 @@ def initialize(engine, sessions):
         if c.schema_version < 5:
             # Additive identity tables: old documents retain unknown identities.
             c.schema_version = 5
+        if c.schema_version < 6:
+            c.schema_version = 6
         db.commit()
 
 
@@ -238,7 +244,8 @@ def check_location_version(item, body):
 
 
 def warehouse_used(db, wid):
-    return (db.query(Balance).filter_by(warehouse_id=wid).first() is not None or
+    return (db.query(Operation).filter_by(warehouse_id=wid).first() is not None or
+            db.query(Balance).filter_by(warehouse_id=wid).first() is not None or
             db.query(Transfer).filter((Transfer.source_id == wid) | (Transfer.destination_id == wid)).first() is not None)
 
 
@@ -272,6 +279,8 @@ def save_location(db, user, body, kitchen=False):
             if kind != item.kind and (linked or warehouse_used(db, item.id) or item.legacy_id is not None):
                 fail("Jenis gudang yang sudah digunakan atau terhubung dapur tidak dapat diganti.", 409)
             if not active:
+                if db.query(Operation).filter(Operation.warehouse_id == item.id, Operation.status.in_(['draft', 'pending', 'approved', 'partial'])).first():
+                    fail("Selesaikan dokumen PO/opname/scrap sebelum menonaktifkan gudang.", 409)
                 has_stock = db.query(Balance).filter(Balance.warehouse_id == item.id, Balance.qty > 0).first()
                 transit = db.query(Transfer).filter((Transfer.source_id == item.id) | (Transfer.destination_id == item.id), Transfer.status != "received").first()
                 assigned = linked and db.query(Product).filter_by(kitchen_id=linked.id, active=True).first()
@@ -452,6 +461,8 @@ def save_product(db, user, body, pid=None):
             if recipe.product_id == p.id or any(m["product_id"] == p.id for m in doc["materials"] + doc["byproducts"]):
                 used = True
                 break
+    if pid and not used:
+        used = any(any(l.get('product_id') == pid for l in json.loads(o.document).get('lines', []) + json.loads(o.document).get('new_lots', [])) for o in db.query(Operation))
     uoms = body.get("uoms", {})
     if not isinstance(uoms, dict):
         fail("Konversi satuan harus berupa objek nama:faktor.")
@@ -621,6 +632,7 @@ def movement(db, balance, lot, qty, kind, reference, user):
 
 
 def stock_rows(db, user):
+    from inventory_operations import reserved
     ids = allowed_warehouses(db, user)
     query = db.query(Balance, Lot).join(Lot, Lot.id == Balance.lot_id).filter(Balance.qty > 0)
     if ids is not None:
@@ -628,19 +640,20 @@ def stock_rows(db, user):
     return [{"balance_id": b.id, "lot_id": l.id, "product_id": l.product_id,
              "warehouse_id": b.warehouse_id, "batch_number": l.batch_number,
              "expiry_date": str(l.expiry_date) if l.expiry_date else None,
-             "qty": str(b.qty), "unit_cost": str(l.unit_cost), "blocked": l.blocked,
+             "qty": str(b.qty), "reserved_scrap": str(reserved(db, b.id)), "available_qty": str(b.qty - reserved(db, b.id)), "unit_cost": str(l.unit_cost), "blocked": l.blocked,
              "usable": not l.blocked and l.expiry_date is not None and l.expiry_date >= today()}
             for b, l in query.order_by(Lot.expiry_date, Lot.received_at, Lot.id)]
 
 
 def fefo(db, product, warehouse, qty):
+    from inventory_operations import reserved
     need, picks = quantity_for(product, qty), []
     rows = db.query(Balance, Lot).join(Lot, Lot.id == Balance.lot_id).filter(
         Balance.warehouse_id == warehouse.id, Lot.product_id == product.id,
         Balance.qty > 0, Lot.blocked.is_(False), Lot.expiry_date >= today()
     ).order_by(Lot.expiry_date, Lot.received_at, Lot.id).all()
     for balance, lot in rows:
-        take = min(need, balance.qty)
+        take = min(need, balance.qty - reserved(db, balance.id))
         if take > 0:
             picks.append((balance, lot, take))
             need -= take
@@ -851,6 +864,12 @@ def install(app, sessions, engine, ready_user, get_db, state_model, user_model, 
                 "products": [product_dict(p) for p in db.query(Product).order_by(Product.code)],
                 "boms": [bom_dict(b) for b in db.query(Bom).order_by(Bom.id)]}
 
+    @app.get("/api/manufacturing/operations")
+    def operations(u=Depends(ready_user), db=Depends(get_db)):
+        from inventory_operations import listing
+        require_active(db)
+        return listing(db, u)
+
     @app.get("/api/manufacturing/stock")
     def stock(u=Depends(ready_user), db=Depends(get_db)):
         require_active(db)
@@ -895,6 +914,9 @@ def install(app, sessions, engine, ready_user, get_db, state_model, user_model, 
             fail("Isi permintaan harus objek.")
 
         def action(who):
+            from inventory_operations import OPERATIONS, handle
+            if operation in OPERATIONS:
+                return handle(db, who, operation, payload)
             if operation == "activate":
                 return migrate(db, who, payload, state_model)
             if operation in {"save-warehouse", "save-kitchen"}:

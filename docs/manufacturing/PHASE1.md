@@ -4,6 +4,9 @@ Implementasi pada branch pengembangan ini menambah mode fondasi di `/manufacturi
 
 ## Fitur yang tersedia
 
+- Purchasing/PO dengan supplier, draft, persetujuan, penerimaan parsial dan penutupan sisa pesanan.
+- Opname per gudang dengan penguncian mutasi, snapshot lot, temuan baru, serta persetujuan selisih.
+- Scrap stok dengan penahanan qty, persetujuan/penolakan, dan posting sekali ke riwayat mutasi.
 - Master 10 dapur dan packing terpisah, 1 gudang masing-masing.
 - Master produk: jenis, satuan dasar, konversi, sifat diskret, umur simpan, dapur aktif, harga jual, dan status aktif.
 - Pengalihan dapur produk dengan alasan dan audit. Penanganan MO berjalan/belum mulai akan ditambahkan bersama modul MO; tahap ini belum memiliki MO.
@@ -30,7 +33,7 @@ Implementasi pada branch pengembangan ini menambah mode fondasi di `/manufacturi
 
 Planning, MO, WO, reservasi MO, perhitungan HPP hasil produksi, scrap/surplus hasil, penerimaan produk turunan, perakitan paket dan perhitungan ED hasil **belum diimplementasikan**. Kolom master dan BOM menyiapkan datanya; bukan klaim bahwa produksi sudah berjalan.
 
-Mode fondasi awal belum memiliki purchasing/PO, opname, approval scrap, master kategori/supplier dan pengiriman pelanggan dari UI lama. Data lamanya tetap berada pada arsip, tetapi tidak bisa diedit setelah cutover. Karena itu gunakan salinan pengujian; penggantian penuh operasional menunggu modul lanjutan. Penerimaan tahap ini menyimpan referensi dokumen, belum melakukan rekonsiliasi PO.
+Mode fondasi kini menyediakan purchasing/PO, supplier, opname, dan approval scrap; lihat OPERATIONS.md. Pengiriman pelanggan dan modul produksi masih menunggu pengembangan. Transaksi lama tetap berada dalam arsip dan tidak otomatis dijadikan dokumen baru. Penerimaan langsung tanpa PO tetap tersedia sebagai jalur operasional terpisah; gunakan menu Purchasing / PO untuk penerimaan yang harus direkonsiliasi ke pesanan.
 
 Transfer mempunyai penerimaan sebagian dan sisa transit. Penyelesaian hilang/rusak/retur transit akan ditambahkan; sisa tidak otomatis dijadikan scrap. Pengiriman dari lot yang kedaluwarsa ditolak. Bila lot kedaluwarsa di perjalanan, penerimaan fisik tetap boleh dicatat, tetapi stok tidak layak dipakai/dikirim.
 
@@ -99,3 +102,8 @@ Schema versi 5 menambahkan tabel identitas pengiriman dan penerimaan tanpa mengu
 ### Pembaruan tampilan
 
 Halaman manufaktur menggunakan URL JavaScript dengan hash isi file dan header `no-store`, sehingga reload setelah update mengambil tampilan yang sesuai. Tab yang sudah terbuka sebelum update tetap perlu dimuat ulang. Jika server meminta nama pengirim tetapi kolomnya tidak muncul, lakukan hard refresh (Ctrl+Shift+R), lalu perbarui/rebuild aplikasi bila masih memakai berkas lama. Tombol Cetak DO berada di sebelah Kirim dengan FEFO dan aktif setelah pengiriman berhasil disimpan.
+
+
+## Pembaruan operasi inventory (schema 6)
+
+Tabel supplier dan dokumen operasi ditambahkan tanpa mengubah saldo lama. UI/API PO, opname, dan scrap memakai transaksi, idempotency key, pembatasan gudang, dan pemeriksaan revision yang sama dengan modul sebelumnya. Panduan lengkap: [OPERATIONS.md](OPERATIONS.md).

@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url "$PIP_INDEX_URL" -r requirements.txt
 
 COPY main.py .
-COPY inventory.py inventory_models.py ./
+COPY inventory.py inventory_models.py inventory_operations.py ./
 COPY static ./static
 
 RUN useradd --create-home --uid 1000 appuser \
